@@ -30,32 +30,138 @@ if TYPE_CHECKING:
 class MotionLoader:
     def __init__(self, motion_file: str, body_indexes: Sequence[int], device: str = "cpu"):
         assert os.path.isfile(motion_file), f"Invalid file path: {motion_file}"
-        data = np.load(motion_file)
-        self.fps = data["fps"]
-        self.joint_pos = torch.tensor(data["joint_pos"], dtype=torch.float32, device=device)
-        self.joint_vel = torch.tensor(data["joint_vel"], dtype=torch.float32, device=device)
-        self._body_pos_w = torch.tensor(data["body_pos_w"], dtype=torch.float32, device=device)
-        self._body_quat_w = torch.tensor(data["body_quat_w"], dtype=torch.float32, device=device)
-        self._body_lin_vel_w = torch.tensor(data["body_lin_vel_w"], dtype=torch.float32, device=device)
-        self._body_ang_vel_w = torch.tensor(data["body_ang_vel_w"], dtype=torch.float32, device=device)
+        data = np.load(motion_file, allow_pickle=True)
+        self.fps = float(np.asarray(data["fps"]).reshape(-1)[0])
         self._body_indexes = body_indexes
-        self.time_step_total = self.joint_pos.shape[0]
+        # import ipdb;ipdb.set_trace()
+        joint_pos = np.asarray(data["joint_pos"], dtype=np.float32)
+        if joint_pos.ndim == 2:
+            joint_pos = joint_pos[None, ...]
+        if joint_pos.ndim != 3:
+            raise ValueError(
+                f"Expected `joint_pos` shape [T, D] or [N_traj, T, D], got {joint_pos.shape}."
+            )
+
+        joint_vel = np.asarray(data["joint_vel"], dtype=np.float32)
+        if joint_vel.ndim == 2:
+            joint_vel = joint_vel[None, ...]
+        if joint_vel.ndim != 3:
+            raise ValueError(
+                f"Expected `joint_vel` shape [T, D] or [N_traj, T, D], got {joint_vel.shape}."
+            )
+        if joint_vel.shape != joint_pos.shape:
+            raise ValueError(
+                f"`joint_vel` shape {joint_vel.shape} must match `joint_pos` shape {joint_pos.shape}."
+            )
+
+        body_pos_w = np.asarray(data["body_pos_w"], dtype=np.float32)
+        if body_pos_w.ndim == 3:
+            body_pos_w = body_pos_w[None, ...]
+        if body_pos_w.ndim != 4 or body_pos_w.shape[-1] != 3:
+            raise ValueError(
+                f"Expected `body_pos_w` shape [T, B, 3] or [N_traj, T, B, 3], got {body_pos_w.shape}."
+            )
+
+        body_quat_w = np.asarray(data["body_quat_w"], dtype=np.float32)
+        if body_quat_w.ndim == 3:
+            body_quat_w = body_quat_w[None, ...]
+        if body_quat_w.ndim != 4 or body_quat_w.shape[-1] != 4:
+            raise ValueError(
+                f"Expected `body_quat_w` shape [T, B, 4] or [N_traj, T, B, 4], got {body_quat_w.shape}."
+            )
+
+        body_lin_vel_w = np.asarray(data["body_lin_vel_w"], dtype=np.float32)
+        if body_lin_vel_w.ndim == 3:
+            body_lin_vel_w = body_lin_vel_w[None, ...]
+        if body_lin_vel_w.ndim != 4 or body_lin_vel_w.shape[-1] != 3:
+            raise ValueError(
+                f"Expected `body_lin_vel_w` shape [T, B, 3] or [N_traj, T, B, 3], got {body_lin_vel_w.shape}."
+            )
+
+        body_ang_vel_w = np.asarray(data["body_ang_vel_w"], dtype=np.float32)
+        if body_ang_vel_w.ndim == 3:
+            body_ang_vel_w = body_ang_vel_w[None, ...]
+        if body_ang_vel_w.ndim != 4 or body_ang_vel_w.shape[-1] != 3:
+            raise ValueError(
+                f"Expected `body_ang_vel_w` shape [T, B, 3] or [N_traj, T, B, 3], got {body_ang_vel_w.shape}."
+            )
+
+        self.num_trajectories = joint_pos.shape[0]
+        self.time_step_total = joint_pos.shape[1]
+        if (
+            body_pos_w.shape[0] != self.num_trajectories
+            or body_quat_w.shape[0] != self.num_trajectories
+            or body_lin_vel_w.shape[0] != self.num_trajectories
+            or body_ang_vel_w.shape[0] != self.num_trajectories
+        ):
+            raise ValueError("Motion arrays must have the same number of trajectories.")
+        if (
+            body_pos_w.shape[1] != self.time_step_total
+            or body_quat_w.shape[1] != self.time_step_total
+            or body_lin_vel_w.shape[1] != self.time_step_total
+            or body_ang_vel_w.shape[1] != self.time_step_total
+        ):
+            raise ValueError("Motion arrays must have the same temporal length.")
+
+        self.joint_pos = torch.tensor(joint_pos, dtype=torch.float32, device=device)
+        self.joint_vel = torch.tensor(joint_vel, dtype=torch.float32, device=device)
+        self._body_pos_w = torch.tensor(body_pos_w, dtype=torch.float32, device=device)
+        self._body_quat_w = torch.tensor(body_quat_w, dtype=torch.float32, device=device)
+        self._body_lin_vel_w = torch.tensor(body_lin_vel_w, dtype=torch.float32, device=device)
+        self._body_ang_vel_w = torch.tensor(body_ang_vel_w, dtype=torch.float32, device=device)
+        self._body_indexes = body_indexes
+        self._joint_action = None
+
+        action = None
+        if "action" in data:
+            action = np.asarray(data["action"], dtype=np.float32)
+        elif "actions" in data:
+            action = np.asarray(data["actions"], dtype=np.float32)
+
+        if action is not None:
+            if action.ndim == 2:
+                action = action[None, ...]
+            if action.ndim != 3:
+                raise ValueError(
+                    f"Expected motion action shape [T, D] or [N_traj, T, D], got {action.shape}."
+                )
+            if action.shape[0] != self.num_trajectories:
+                raise ValueError(
+                    f"Motion action trajectory mismatch. Expected {self.num_trajectories}, got {action.shape[0]}."
+                )
+            if action.shape[1] != self.time_step_total:
+                raise ValueError(
+                    f"Motion action length mismatch. Expected {self.time_step_total}, got {action.shape[1]}."
+                )
+            if action.shape[2] != self.joint_pos.shape[2]:
+                raise ValueError(
+                    f"Motion action dim mismatch. joint_pos has dim {self.joint_pos.shape[2]}, action has dim {action.shape[2]}."
+                )
+            self._joint_action = torch.tensor(action, dtype=torch.float32, device=device)
 
     @property
     def body_pos_w(self) -> torch.Tensor:
-        return self._body_pos_w[:, self._body_indexes]
+        return self._body_pos_w[:, :, self._body_indexes]
 
     @property
     def body_quat_w(self) -> torch.Tensor:
-        return self._body_quat_w[:, self._body_indexes]
+        return self._body_quat_w[:, :, self._body_indexes]
 
     @property
     def body_lin_vel_w(self) -> torch.Tensor:
-        return self._body_lin_vel_w[:, self._body_indexes]
+        return self._body_lin_vel_w[:, :, self._body_indexes]
 
     @property
     def body_ang_vel_w(self) -> torch.Tensor:
-        return self._body_ang_vel_w[:, self._body_indexes]
+        return self._body_ang_vel_w[:, :, self._body_indexes]
+
+    @property
+    def has_joint_action(self) -> bool:
+        return self._joint_action is not None
+
+    @property
+    def joint_action(self) -> torch.Tensor | None:
+        return self._joint_action
 
 
 class MotionCommand(CommandTerm):
@@ -63,7 +169,6 @@ class MotionCommand(CommandTerm):
 
     def __init__(self, cfg: MotionCommandCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
-
         self.robot: Articulation = env.scene[cfg.asset_name]
         self.robot_anchor_body_index = self.robot.body_names.index(self.cfg.anchor_body_name)
         self.motion_anchor_body_index = self.cfg.body_names.index(self.cfg.anchor_body_name)
@@ -72,6 +177,8 @@ class MotionCommand(CommandTerm):
         )
 
         self.motion = MotionLoader(self.cfg.motion_file, self.body_indexes, device=self.device)
+        self.trajectory_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._trajectory_sampling_offset = 0
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.body_pos_relative_w = torch.zeros(self.num_envs, len(cfg.body_names), 3, device=self.device)
         self.body_quat_relative_w = torch.zeros(self.num_envs, len(cfg.body_names), 4, device=self.device)
@@ -103,43 +210,56 @@ class MotionCommand(CommandTerm):
 
     @property
     def joint_pos(self) -> torch.Tensor:
-        return self.motion.joint_pos[self.time_steps]
+        return self.motion.joint_pos[self.trajectory_ids, self.time_steps]
 
     @property
     def joint_vel(self) -> torch.Tensor:
-        return self.motion.joint_vel[self.time_steps]
+        return self.motion.joint_vel[self.trajectory_ids, self.time_steps]
+
+    @property
+    def has_joint_action(self) -> bool:
+        return self.motion.has_joint_action
+
+    @property
+    def joint_action(self) -> torch.Tensor:
+        if not self.motion.has_joint_action or self.motion.joint_action is None:
+            raise RuntimeError("Motion file does not contain `action`/`actions`, but motion_joint_action was requested.")
+        return self.motion.joint_action[self.trajectory_ids, self.time_steps]
 
     @property
     def body_pos_w(self) -> torch.Tensor:
-        return self.motion.body_pos_w[self.time_steps] + self._env.scene.env_origins[:, None, :]
+        return self.motion.body_pos_w[self.trajectory_ids, self.time_steps] + self._env.scene.env_origins[:, None, :]
 
     @property
     def body_quat_w(self) -> torch.Tensor:
-        return self.motion.body_quat_w[self.time_steps]
+        return self.motion.body_quat_w[self.trajectory_ids, self.time_steps]
 
     @property
     def body_lin_vel_w(self) -> torch.Tensor:
-        return self.motion.body_lin_vel_w[self.time_steps]
+        return self.motion.body_lin_vel_w[self.trajectory_ids, self.time_steps]
 
     @property
     def body_ang_vel_w(self) -> torch.Tensor:
-        return self.motion.body_ang_vel_w[self.time_steps]
+        return self.motion.body_ang_vel_w[self.trajectory_ids, self.time_steps]
 
     @property
     def anchor_pos_w(self) -> torch.Tensor:
-        return self.motion.body_pos_w[self.time_steps, self.motion_anchor_body_index] + self._env.scene.env_origins
+        return (
+            self.motion.body_pos_w[self.trajectory_ids, self.time_steps, self.motion_anchor_body_index]
+            + self._env.scene.env_origins
+        )
 
     @property
     def anchor_quat_w(self) -> torch.Tensor:
-        return self.motion.body_quat_w[self.time_steps, self.motion_anchor_body_index]
+        return self.motion.body_quat_w[self.trajectory_ids, self.time_steps, self.motion_anchor_body_index]
 
     @property
     def anchor_lin_vel_w(self) -> torch.Tensor:
-        return self.motion.body_lin_vel_w[self.time_steps, self.motion_anchor_body_index]
+        return self.motion.body_lin_vel_w[self.trajectory_ids, self.time_steps, self.motion_anchor_body_index]
 
     @property
     def anchor_ang_vel_w(self) -> torch.Tensor:
-        return self.motion.body_ang_vel_w[self.time_steps, self.motion_anchor_body_index]
+        return self.motion.body_ang_vel_w[self.trajectory_ids, self.time_steps, self.motion_anchor_body_index]
 
     @property
     def robot_joint_pos(self) -> torch.Tensor:
@@ -240,9 +360,33 @@ class MotionCommand(CommandTerm):
         self.metrics["sampling_top1_prob"][:] = pmax
         self.metrics["sampling_top1_bin"][:] = imax.float() / self.bin_count
 
+    def _sample_trajectory_ids(self, env_ids: Sequence[int]):
+        if len(env_ids) == 0:
+            return
+        if self.motion.num_trajectories <= 1:
+            self.trajectory_ids[env_ids] = 0
+            return
+        if not self.cfg.sample_trajectories:
+            self.trajectory_ids[env_ids] = 0
+            return
+
+        num_to_sample = len(env_ids)
+        num_traj = self.motion.num_trajectories
+
+        if self.cfg.equal_trajectory_sampling:
+            # Balanced assignment with random order: each trajectory appears floor/ceil equally often.
+            base = (torch.arange(num_to_sample, device=self.device) + self._trajectory_sampling_offset) % num_traj
+            self._trajectory_sampling_offset = int((self._trajectory_sampling_offset + num_to_sample) % num_traj)
+            sampled = base[torch.randperm(num_to_sample, device=self.device)]
+        else:
+            sampled = torch.randint(0, num_traj, (num_to_sample,), device=self.device)
+
+        self.trajectory_ids[env_ids] = sampled.long()
+
     def _resample_command(self, env_ids: Sequence[int]):
         if len(env_ids) == 0:
             return
+        self._sample_trajectory_ids(env_ids)
         self._adaptive_sampling(env_ids)
 
         root_pos = self.body_pos_w[:, 0].clone()
@@ -369,6 +513,10 @@ class MotionCommandCfg(CommandTermCfg):
     adaptive_lambda: float = 0.8
     adaptive_uniform_ratio: float = 0.1
     adaptive_alpha: float = 0.001
+
+    # Multi-trajectory sampling controls.
+    sample_trajectories: bool = False
+    equal_trajectory_sampling: bool = False
 
     anchor_visualizer_cfg: VisualizationMarkersCfg = FRAME_MARKER_CFG.replace(prim_path="/Visuals/Command/pose")
     anchor_visualizer_cfg.markers["frame"].scale = (0.2, 0.2, 0.2)

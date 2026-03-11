@@ -28,6 +28,28 @@ gym.register(
 
 
 gym.register(
+    id="Tracking-Flat-G1-DeltaA-OpenLoop-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.G1FlatDeltaAOpenLoopEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1FlatPPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Tracking-Flat-G1-DeltaA-Finetune-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": flat_env_cfg.G1FlatDeltaAFineTuneEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1FlatDeltaAFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
     id="Tracking-Flat-G1-Low-Freq-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,

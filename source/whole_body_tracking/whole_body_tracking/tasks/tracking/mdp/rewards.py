@@ -80,3 +80,8 @@ def feet_contact_time(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, thresh
     last_contact_time = contact_sensor.data.last_contact_time[:, sensor_cfg.body_ids]
     reward = torch.sum((last_contact_time < threshold) * first_air, dim=-1)
     return reward
+
+
+def penalty_minimal_action_norm(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Delta-action regularizer: exp(-||a_delta||) - 1."""
+    return torch.exp(-torch.norm(env.action_manager.action, dim=-1)) - 1.0

@@ -34,6 +34,12 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
     arg_group.add_argument(
         "--wandb_path", type=str, default=None, help="Name of the logging project when using wandb or neptune."
     )
+    arg_group.add_argument(
+        "--delta_policy_checkpoint",
+        type=str,
+        default=None,
+        help="Path to frozen delta-policy checkpoint for delta-action finetuning runners.",
+    )
 
 
 def parse_rsl_rl_cfg(task_name: str, args_cli: argparse.Namespace) -> RslRlOnPolicyRunnerCfg:
@@ -77,6 +83,8 @@ def update_rsl_rl_cfg(agent_cfg: RslRlOnPolicyRunnerCfg, args_cli: argparse.Name
         agent_cfg.run_name = args_cli.run_name
     if args_cli.logger is not None:
         agent_cfg.logger = args_cli.logger
+    if args_cli.delta_policy_checkpoint is not None and hasattr(agent_cfg, "delta_policy_checkpoint"):
+        agent_cfg.delta_policy_checkpoint = args_cli.delta_policy_checkpoint
     # set the project name for wandb and neptune
     if agent_cfg.logger in {"wandb", "neptune"} and args_cli.log_project_name:
         agent_cfg.wandb_project = args_cli.log_project_name

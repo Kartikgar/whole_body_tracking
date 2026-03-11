@@ -41,3 +41,18 @@ class G1FlatLowFreqPPORunnerCfg(G1FlatPPORunnerCfg):
         self.num_steps_per_env = round(self.num_steps_per_env * LOW_FREQ_SCALE)
         self.algorithm.gamma = self.algorithm.gamma ** (1 / LOW_FREQ_SCALE)
         self.algorithm.lam = self.algorithm.lam ** (1 / LOW_FREQ_SCALE)
+
+
+@configclass
+class G1FlatDeltaAFineTunePPORunnerCfg(G1FlatPPORunnerCfg):
+    experiment_name = "g1_deltaa_finetune"
+    max_iterations = 1000
+    save_interval = 5
+
+    # Frozen open-loop delta policy checkpoint used to inject delta actions during rollout.
+    delta_policy_checkpoint: str | None = None
+    delta_policy_obs_group: str = "delta_policy"
+    delta_policy_critic_obs_group: str = "delta_policy"
+    delta_policy_action_buffer_name: str = "delta_external_actions"
+    delta_policy_require: bool = True
+    delta_policy_clip_actions: float | None = None
