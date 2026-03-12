@@ -219,6 +219,16 @@ class RewardsCfg:
         weight=1.0,
         params={"command_name": "motion", "std": 0.4},
     )
+    motion_body_pos_global = RewTerm(
+        func=mdp.motion_global_body_position_error_exp,
+        weight=1.0,
+        params={"command_name": "motion", "std": 0.3},
+    )
+    motion_body_ori_global = RewTerm(
+        func=mdp.motion_global_body_orientation_error_exp,
+        weight=1.0,
+        params={"command_name": "motion", "std": 0.4},
+    )
     motion_body_lin_vel = RewTerm(
         func=mdp.motion_global_body_linear_velocity_error_exp,
         weight=1.0,

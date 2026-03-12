@@ -112,7 +112,9 @@ class G1FlatEnvCfg(TrackingEnvCfg):
             "right_elbow_link",
             "right_wrist_yaw_link",
         ]
-
+        self.terminations.ee_body_pos = None
+        self.terminations.anchor_pos = None
+        self.episode_length_s = 10.0
 
 @configclass
 class G1FlatDeltaAOpenLoopEnvCfg(G1FlatEnvCfg):
@@ -131,9 +133,13 @@ class G1FlatDeltaAOpenLoopEnvCfg(G1FlatEnvCfg):
         )
         self.actions.joint_pos.scale = G1_ACTION_SCALE
 
+        # Use global body pose rewards instead of relative-body pose rewards.
+        self.rewards.motion_body_pos = None
+        self.rewards.motion_body_ori = None
         self.rewards.penalty_minimal_action_norm = RewTerm(func=mdp.penalty_minimal_action_norm, weight=-0.1)
-        self.terminations.ee_body_pos.params["threshold"] = 0.35
-        self.episode_length_s = 20.0
+        self.terminations.ee_body_pos = None
+        self.terminations.anchor_pos = None
+        self.episode_length_s = 10.0
 
 
 @configclass
