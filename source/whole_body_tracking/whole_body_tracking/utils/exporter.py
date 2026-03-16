@@ -33,12 +33,13 @@ class _OnnxMotionPolicyExporter(_OnnxPolicyExporter):
         super().__init__(actor_critic, normalizer, verbose)
         cmd: MotionCommand = env.command_manager.get_term("motion")
 
-        self.joint_pos = cmd.motion.joint_pos.to("cpu")
-        self.joint_vel = cmd.motion.joint_vel.to("cpu")
-        self.body_pos_w = cmd.motion.body_pos_w.to("cpu")
-        self.body_quat_w = cmd.motion.body_quat_w.to("cpu")
-        self.body_lin_vel_w = cmd.motion.body_lin_vel_w.to("cpu")
-        self.body_ang_vel_w = cmd.motion.body_ang_vel_w.to("cpu")
+        traj = cmd.motion.get_trajectory_data(0)
+        self.joint_pos = traj["joint_pos"].to("cpu")
+        self.joint_vel = traj["joint_vel"].to("cpu")
+        self.body_pos_w = traj["body_pos_w"].to("cpu")
+        self.body_quat_w = traj["body_quat_w"].to("cpu")
+        self.body_lin_vel_w = traj["body_lin_vel_w"].to("cpu")
+        self.body_ang_vel_w = traj["body_ang_vel_w"].to("cpu")
         self.time_step_total = self.joint_pos.shape[0]
 
     def forward(self, x, time_step):
