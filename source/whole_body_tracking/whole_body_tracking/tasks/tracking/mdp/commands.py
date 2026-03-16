@@ -523,21 +523,21 @@ class MotionCommand(CommandTerm):
     @property
     def anchor_pos_w(self) -> torch.Tensor:
         return (
-            self.motion.get_body_pos_w_full(self.trajectory_ids, self.time_steps)[:, self.motion_anchor_body_index]
+            self.motion.get_body_pos_w(self.trajectory_ids, self.time_steps)[:, self.motion_anchor_body_index]
             + self._env.scene.env_origins
         )
 
     @property
     def anchor_quat_w(self) -> torch.Tensor:
-        return self.motion.get_body_quat_w_full(self.trajectory_ids, self.time_steps)[:, self.motion_anchor_body_index]
+        return self.motion.get_body_quat_w(self.trajectory_ids, self.time_steps)[:, self.motion_anchor_body_index]
 
     @property
     def anchor_lin_vel_w(self) -> torch.Tensor:
-        return self.motion.get_body_lin_vel_w_full(self.trajectory_ids, self.time_steps)[:, self.motion_anchor_body_index]
+        return self.motion.get_body_lin_vel_w(self.trajectory_ids, self.time_steps)[:, self.motion_anchor_body_index]
 
     @property
     def anchor_ang_vel_w(self) -> torch.Tensor:
-        return self.motion.get_body_ang_vel_w_full(self.trajectory_ids, self.time_steps)[:, self.motion_anchor_body_index]
+        return self.motion.get_body_ang_vel_w(self.trajectory_ids, self.time_steps)[:, self.motion_anchor_body_index]
 
     @property
     def robot_joint_pos(self) -> torch.Tensor:
