@@ -78,6 +78,18 @@ class MotionOnPolicyRunner(OnPolicyRunner):
         with open(agent_cfg_path, encoding="utf-8") as f:
             delta_agent_cfg = yaml.safe_load(f)
 
+        loaded_dict = torch.load(str(checkpoint_path), map_location=self.device, weights_only=False)
+        state_dict = loaded_dict["model_state_dict"]
+
+        def _infer_mlp_input_dim(prefix: str) -> int | None:
+            direct_key = f"{prefix}.0.weight"
+            if direct_key in state_dict and state_dict[direct_key].ndim == 2:
+                return int(state_dict[direct_key].shape[1])
+            for key, value in state_dict.items():
+                if key.startswith(f"{prefix}.") and key.endswith(".weight") and getattr(value, "ndim", None) == 2:
+                    return int(value.shape[1])
+            return None
+
         obs, extras = self.env.get_observations()
         obs_dict = extras["observations"]
         if self.delta_policy_obs_group not in obs_dict:
@@ -85,14 +97,44 @@ class MotionOnPolicyRunner(OnPolicyRunner):
                 f"Delta policy observation group '{self.delta_policy_obs_group}' not found. "
                 f"Available groups: {list(obs_dict.keys())}"
             )
-        if self.delta_policy_critic_obs_group not in obs_dict:
-            raise KeyError(
-                f"Delta policy critic observation group '{self.delta_policy_critic_obs_group}' not found. "
-                f"Available groups: {list(obs_dict.keys())}"
-            )
 
         num_actor_obs = obs_dict[self.delta_policy_obs_group].shape[1]
-        num_critic_obs = obs_dict[self.delta_policy_critic_obs_group].shape[1]
+        ckpt_actor_obs = _infer_mlp_input_dim("actor")
+        if ckpt_actor_obs is not None and num_actor_obs != ckpt_actor_obs:
+            matching_groups = [name for name, value in obs_dict.items() if value.shape[1] == ckpt_actor_obs]
+            if len(matching_groups) == 1:
+                self.delta_policy_obs_group = matching_groups[0]
+                num_actor_obs = ckpt_actor_obs
+                print(
+                    f"[INFO]: Delta policy obs-group auto-switch: using '{self.delta_policy_obs_group}' "
+                    f"to match checkpoint actor input dim {ckpt_actor_obs}."
+                )
+            else:
+                group_dims = {name: int(value.shape[1]) for name, value in obs_dict.items()}
+                raise RuntimeError(
+                    "Delta policy actor observation dimension mismatch: "
+                    f"env group '{self.delta_policy_obs_group}' has dim {num_actor_obs}, "
+                    f"checkpoint expects dim {ckpt_actor_obs}. Available groups: {group_dims}."
+                )
+
+        env_critic_obs = (
+            obs_dict[self.delta_policy_critic_obs_group].shape[1]
+            if self.delta_policy_critic_obs_group in obs_dict
+            else None
+        )
+        ckpt_critic_obs = _infer_mlp_input_dim("critic")
+        if ckpt_critic_obs is not None:
+            num_critic_obs = ckpt_critic_obs
+            if env_critic_obs is not None and env_critic_obs != ckpt_critic_obs:
+                print(
+                    "[INFO]: Delta critic obs dim mismatch between env and checkpoint "
+                    f"({env_critic_obs} vs {ckpt_critic_obs}). Using checkpoint dim for frozen policy load."
+                )
+        elif env_critic_obs is not None:
+            num_critic_obs = env_critic_obs
+        else:
+            num_critic_obs = num_actor_obs
+
         num_actions = self.env.num_actions
 
         policy_cfg = dict(delta_agent_cfg["policy"])
@@ -101,7 +143,6 @@ class MotionOnPolicyRunner(OnPolicyRunner):
             policy_class(num_actor_obs, num_critic_obs, num_actions, **policy_cfg).to(self.device)
         )
 
-        loaded_dict = torch.load(str(checkpoint_path), map_location=self.device, weights_only=False)
         self.delta_policy.load_state_dict(loaded_dict["model_state_dict"], strict=True)
         self.delta_policy.eval()
         for param in self.delta_policy.parameters():

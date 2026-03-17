@@ -22,8 +22,18 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
     arg_group.add_argument("--run_name", type=str, default=None, help="Run name suffix to the log directory.")
     # -- load arguments
     arg_group.add_argument("--resume", type=bool, default=None, help="Whether to resume from a checkpoint.")
-    arg_group.add_argument("--load_run", type=str, default=None, help="Name of the run folder to resume from.")
-    arg_group.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file to resume from.")
+    arg_group.add_argument(
+        "--load_run",
+        type=str,
+        default=None,
+        help="Deprecated for training resume; ignored.",
+    )
+    arg_group.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Full path to checkpoint file to resume from (for example: /abs/path/to/model_1000.pt).",
+    )
     # -- logger arguments
     arg_group.add_argument(
         "--logger", type=str, default=None, choices={"wandb", "tensorboard", "neptune"}, help="Logger module to use."
@@ -32,7 +42,10 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
         "--log_project_name", type=str, default=None, help="Name of the logging project when using wandb or neptune."
     )
     arg_group.add_argument(
-        "--wandb_path", type=str, default=None, help="Name of the logging project when using wandb or neptune."
+        "--wandb_path",
+        type=str,
+        default=None,
+        help="Wandb run path for checkpoint resume (entity/project/run or entity/project/run/model_x.pt).",
     )
     arg_group.add_argument(
         "--delta_policy_checkpoint",

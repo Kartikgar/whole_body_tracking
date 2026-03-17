@@ -71,7 +71,6 @@ from isaaclab.envs import (
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.io import dump_pickle, dump_yaml
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
-from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 # Import extensions to set up environment tasks
@@ -159,10 +158,43 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     )
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
-    # save resume path before creating a new log_dir
+    # Save resume path before creating a new log_dir.
+    # We treat --checkpoint as an explicit file path for resume.
+    # Alternatively, --wandb_path can be used to fetch a checkpoint from a wandb run.
     if agent_cfg.resume:
-        # get path to previous checkpoint
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+        if args_cli.checkpoint is not None:
+            resume_path = os.path.abspath(os.path.expanduser(args_cli.checkpoint))
+            if not os.path.isfile(resume_path):
+                raise FileNotFoundError(
+                    f"Checkpoint file not found: {resume_path}. "
+                    "Pass `--checkpoint /abs/path/to/model_x.pt`."
+                )
+        elif args_cli.wandb_path:
+            import wandb
+
+            run_path = args_cli.wandb_path
+            api = wandb.Api()
+            if "model" in args_cli.wandb_path:
+                run_path = "/".join(args_cli.wandb_path.split("/")[:-1])
+            wandb_run = api.run(run_path)
+            files = [file.name for file in wandb_run.files() if "model" in file.name]
+            if len(files) == 0:
+                raise FileNotFoundError(f"No model checkpoint files found in wandb run: {run_path}")
+            if "model" in args_cli.wandb_path:
+                file = args_cli.wandb_path.split("/")[-1]
+            else:
+                file = max(files, key=lambda x: int(x.split("_")[1].split(".")[0]))
+
+            download_dir = os.path.abspath(os.path.join("logs", "rsl_rl", "temp"))
+            os.makedirs(download_dir, exist_ok=True)
+            wandb_file = wandb_run.file(str(file))
+            wandb_file.download(download_dir, replace=True)
+            resume_path = os.path.join(download_dir, file)
+        else:
+            raise ValueError(
+                "`--resume True` requires either `--checkpoint /abs/path/to/model_x.pt` "
+                "or `--wandb_path entity/project/run[/model_x.pt]`."
+            )
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)

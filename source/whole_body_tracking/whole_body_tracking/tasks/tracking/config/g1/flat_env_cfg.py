@@ -15,19 +15,30 @@ from whole_body_tracking.tasks.tracking.tracking_env_cfg import TrackingEnvCfg
 class DeltaPolicyObsCfg(ObsGroup):
     """Observation group consumed by the frozen delta policy during finetuning."""
 
-    command = ObsTerm(func=mdp.generated_commands, params={"command_name": "motion"})
-    motion_anchor_pos_b = ObsTerm(func=mdp.motion_anchor_pos_b, params={"command_name": "motion"})
-    motion_anchor_ori_b = ObsTerm(func=mdp.motion_anchor_ori_b, params={"command_name": "motion"})
-    base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
-    base_ang_vel = ObsTerm(func=mdp.base_ang_vel)
-    joint_pos = ObsTerm(func=mdp.joint_pos_rel)
-    joint_vel = ObsTerm(func=mdp.joint_vel_rel)
-    actions = ObsTerm(func=mdp.external_delta_action, params={"action_buffer_name": "delta_external_actions"})
-    motion_joint_action = ObsTerm(func=mdp.motion_joint_action, params={"command_name": "motion"})
+    # Match open-loop delta-policy actor observation layout/scales.
+    base_pos_z = ObsTerm(func=mdp.base_pos_z, scale=1.0)
+    feet_contact_force = ObsTerm(
+        func=mdp.feet_contact_force,
+        params={
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces", body_names=["left_ankle_roll_link", "right_ankle_roll_link"]
+            )
+        },
+        scale=0.01,
+    )
+    base_lin_vel = ObsTerm(func=mdp.base_lin_vel, scale=2.0)
+    base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.25)
+    projected_gravity = ObsTerm(func=mdp.projected_gravity, scale=1.0)
+    joint_pos = ObsTerm(func=mdp.joint_pos_rel, scale=1.0)
+    joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
+    # Frozen policy uses its own previous delta action rather than base-policy action.
+    actions = ObsTerm(func=mdp.external_delta_action, params={"action_buffer_name": "delta_external_actions"}, scale=1.0)
+    motion_joint_action = ObsTerm(func=mdp.motion_joint_action, params={"command_name": "motion"}, scale=1.0)
 
     def __post_init__(self):
         self.enable_corruption = False
         self.concatenate_terms = True
+        self.history_length = 0
 
 
 @configclass
@@ -99,40 +110,56 @@ class G1FlatEnvCfg(TrackingEnvCfg):
         self.actions.joint_pos.scale = G1_ACTION_SCALE
         self.commands.motion.debug_vis_goal_relative_to_robot = False
         self.commands.motion.anchor_body_name = "torso_link"
+        # self.commands.motion.body_names = [
+        #     "pelvis",
+        #     "left_hip_pitch_link",
+        #     "left_hip_roll_link",
+        #     "left_hip_yaw_link",
+        #     "left_knee_link",
+        #     "left_ankle_pitch_link",
+        #     "left_ankle_roll_link",
+        #     "right_hip_pitch_link",
+        #     "right_hip_roll_link",
+        #     "right_hip_yaw_link",
+        #     "right_knee_link",
+        #     "right_ankle_pitch_link",
+        #     "right_ankle_roll_link",
+        #     "waist_yaw_link",
+        #     "waist_roll_link",
+        #     "torso_link",
+        #     "left_shoulder_pitch_link",
+        #     "left_shoulder_roll_link",
+        #     "left_shoulder_yaw_link",
+        #     "left_elbow_link",
+        #     "left_wrist_roll_link",
+        #     "left_wrist_pitch_link",
+        #     "left_wrist_yaw_link",
+        #     "right_shoulder_pitch_link",
+        #     "right_shoulder_roll_link",
+        #     "right_shoulder_yaw_link",
+        #     "right_elbow_link",
+        #     "right_wrist_roll_link",
+        #     "right_wrist_pitch_link",
+        #     "right_wrist_yaw_link",
+        # ]
         self.commands.motion.body_names = [
             "pelvis",
-            "left_hip_pitch_link",
             "left_hip_roll_link",
-            "left_hip_yaw_link",
             "left_knee_link",
-            "left_ankle_pitch_link",
             "left_ankle_roll_link",
-            "right_hip_pitch_link",
             "right_hip_roll_link",
-            "right_hip_yaw_link",
             "right_knee_link",
-            "right_ankle_pitch_link",
             "right_ankle_roll_link",
-            "waist_yaw_link",
-            "waist_roll_link",
             "torso_link",
-            "left_shoulder_pitch_link",
             "left_shoulder_roll_link",
-            "left_shoulder_yaw_link",
             "left_elbow_link",
-            "left_wrist_roll_link",
-            "left_wrist_pitch_link",
             "left_wrist_yaw_link",
-            "right_shoulder_pitch_link",
             "right_shoulder_roll_link",
-            "right_shoulder_yaw_link",
             "right_elbow_link",
-            "right_wrist_roll_link",
-            "right_wrist_pitch_link",
             "right_wrist_yaw_link",
         ]
-        self.terminations.ee_body_pos = None
-        self.terminations.anchor_pos = None
+        # self.terminations.ee_body_pos = None
+        # self.terminations.anchor_pos = None
         self.episode_length_s = 10.0
 
 @configclass
@@ -177,6 +204,10 @@ class G1FlatDeltaAFineTuneEnvCfg(G1FlatEnvCfg):
 
         self.observations.delta_policy = DeltaPolicyObsCfg()
         self.rewards.penalty_minimal_action_norm = None
+        self.rewards.motion_body_pos_global = None
+        self.rewards.motion_body_ori_global = None
+        self.episode_length_s = 10.0
+        self.terminations.ee_body_pos = None
 
 
 @configclass
