@@ -44,6 +44,9 @@ class MotionOnPolicyRunner(OnPolicyRunner):
         self.delta_policy_obs_group = self.cfg.get("delta_policy_obs_group", "delta_policy")
         self.delta_policy_critic_obs_group = self.cfg.get("delta_policy_critic_obs_group", self.delta_policy_obs_group)
         self.delta_policy_action_buffer_name = self.cfg.get("delta_policy_action_buffer_name", "delta_external_actions")
+        self.delta_policy_base_action_buffer_name = self.cfg.get(
+            "delta_policy_base_action_buffer_name", "delta_base_actions"
+        )
         self.delta_policy_require = bool(self.cfg.get("delta_policy_require", False))
         self.delta_policy_clip_actions = self.cfg.get("delta_policy_clip_actions", self.env.clip_actions)
 
@@ -156,15 +159,24 @@ class MotionOnPolicyRunner(OnPolicyRunner):
         else:
             self.delta_obs_normalizer = torch.nn.Identity().to(self.device)
 
-    def _compute_delta_actions(self, obs_dict: dict[str, torch.Tensor]) -> torch.Tensor | None:
+    def _compute_delta_policy_obs(self) -> torch.Tensor:
+        delta_obs = self.env.unwrapped.observation_manager.compute_group(self.delta_policy_obs_group)
+        if isinstance(delta_obs, dict):
+            active_terms = self.env.unwrapped.observation_manager.active_terms[self.delta_policy_obs_group]
+            delta_obs = torch.cat([delta_obs[name] for name in active_terms], dim=-1)
+        return delta_obs
+
+    def _compute_delta_actions(self, delta_obs_or_dict: torch.Tensor | dict[str, torch.Tensor]) -> torch.Tensor | None:
         if self.delta_policy is None:
             return None
-        if self.delta_policy_obs_group not in obs_dict:
-            raise KeyError(
-                f"Delta policy observation group '{self.delta_policy_obs_group}' missing from env observations."
-            )
-
-        delta_obs = obs_dict[self.delta_policy_obs_group].to(self.device)
+        if isinstance(delta_obs_or_dict, dict):
+            if self.delta_policy_obs_group not in delta_obs_or_dict:
+                raise KeyError(
+                    f"Delta policy observation group '{self.delta_policy_obs_group}' missing from env observations."
+                )
+            delta_obs = delta_obs_or_dict[self.delta_policy_obs_group].to(self.device)
+        else:
+            delta_obs = delta_obs_or_dict.to(self.device)
         with torch.inference_mode():
             delta_actions = self.delta_policy.act_inference(self.delta_obs_normalizer(delta_obs)).detach()
         if self.delta_policy_clip_actions is not None:
@@ -178,9 +190,18 @@ class MotionOnPolicyRunner(OnPolicyRunner):
             delta_actions.to(self.env.device),
         )
 
+    def _set_delta_base_action_buffer(self, base_actions: torch.Tensor):
+        setattr(
+            self.env.unwrapped,
+            self.delta_policy_base_action_buffer_name,
+            base_actions.to(self.env.device),
+        )
+
     def _clear_delta_action_buffer(self):
         if hasattr(self.env.unwrapped, self.delta_policy_action_buffer_name):
             delattr(self.env.unwrapped, self.delta_policy_action_buffer_name)
+        if hasattr(self.env.unwrapped, self.delta_policy_base_action_buffer_name):
+            delattr(self.env.unwrapped, self.delta_policy_base_action_buffer_name)
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):  # noqa: C901
         if self.delta_policy is None:
@@ -212,7 +233,6 @@ class MotionOnPolicyRunner(OnPolicyRunner):
             )
 
         obs, extras = self.env.get_observations()
-        obs_dict_for_delta = extras["observations"]
         privileged_obs = extras["observations"].get(self.privileged_obs_type, obs)
         obs, privileged_obs = obs.to(self.device), privileged_obs.to(self.device)
         self.train_mode()
@@ -239,15 +259,17 @@ class MotionOnPolicyRunner(OnPolicyRunner):
             start = time.time()
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
-                    delta_actions = self._compute_delta_actions(obs_dict_for_delta)
+                    actions = self.alg.act(obs, privileged_obs)
+                    self._set_delta_base_action_buffer(actions)
+
+                    delta_obs = self._compute_delta_policy_obs()
+                    delta_actions = self._compute_delta_actions(delta_obs)
                     if delta_actions is None:
                         raise RuntimeError("Delta policy is required for this runner mode but is not initialized.")
                     self._set_delta_action_buffer(delta_actions)
 
-                    actions = self.alg.act(obs, privileged_obs)
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
                     obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
-                    obs_dict_for_delta = infos["observations"]
 
                     obs = self.obs_normalizer(obs)
                     if self.privileged_obs_type is not None:

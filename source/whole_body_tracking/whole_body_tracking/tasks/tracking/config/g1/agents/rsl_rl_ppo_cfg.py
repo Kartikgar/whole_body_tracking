@@ -54,5 +54,6 @@ class G1FlatDeltaAFineTunePPORunnerCfg(G1FlatPPORunnerCfg):
     delta_policy_obs_group: str = "delta_policy"
     delta_policy_critic_obs_group: str = "critic"
     delta_policy_action_buffer_name: str = "delta_external_actions"
+    delta_policy_base_action_buffer_name: str = "delta_base_actions"
     delta_policy_require: bool = True
     delta_policy_clip_actions: float | None = None

@@ -101,6 +101,14 @@ def external_delta_action(env: ManagerBasedEnv, action_buffer_name: str = "delta
     return action.view(env.num_envs, -1)
 
 
+def current_action(env: ManagerBasedEnv, action_buffer_name: str = "delta_base_actions") -> torch.Tensor:
+    """Current-step policy action injected by the runner before delta-policy inference."""
+    action = getattr(env, action_buffer_name, None)
+    if action is None:
+        return torch.zeros(env.num_envs, env.action_manager.total_action_dim, device=env.device)
+    return action.view(env.num_envs, -1)
+
+
 def feet_contact_force(env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     """Latest world-frame contact force vector on selected feet, flattened as [B, 3 * num_feet]."""
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]

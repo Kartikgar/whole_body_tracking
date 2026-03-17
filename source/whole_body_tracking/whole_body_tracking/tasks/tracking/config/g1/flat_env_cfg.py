@@ -31,9 +31,10 @@ class DeltaPolicyObsCfg(ObsGroup):
     projected_gravity = ObsTerm(func=mdp.projected_gravity, scale=1.0)
     joint_pos = ObsTerm(func=mdp.joint_pos_rel, scale=1.0)
     joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
-    # Frozen policy uses its own previous delta action rather than base-policy action.
+    # `actions`: frozen delta-policy action history channel (autoregressive).
     actions = ObsTerm(func=mdp.external_delta_action, params={"action_buffer_name": "delta_external_actions"}, scale=1.0)
-    motion_joint_action = ObsTerm(func=mdp.motion_joint_action, params={"command_name": "motion"}, scale=1.0)
+    # `current_action`: same-step policy-being-finetuned rollout action (injected by runner).
+    current_action = ObsTerm(func=mdp.current_action, params={"action_buffer_name": "delta_base_actions"}, scale=1.0)
 
     def __post_init__(self):
         self.enable_corruption = False
