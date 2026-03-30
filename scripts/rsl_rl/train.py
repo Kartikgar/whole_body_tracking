@@ -28,11 +28,21 @@ parser.add_argument(
     "--delta_action_space",
     type=str,
     default="whole_body",
-    choices=("whole_body", "ankles", "lower_body"),
+    choices=("whole_body", "ankles", "lower_body", "com_force"),
     help=(
         "Delta-action space mode. `whole_body` keeps current behavior. "
-        "`ankles` uses only ankle joints; `lower_body` uses lower-body joints. "
-        "Both remap outputs into the full-body action vector."
+        "`ankles` uses only ankle joints; `lower_body` uses lower-body joints; "
+        "`com_force` uses (Fx, Fy, Fz) COM force actions. "
+        "Joint-space modes remap outputs into the full-body action vector."
+    ),
+)
+parser.add_argument(
+    "--delta_com_force_scale",
+    type=float,
+    default=1.0,
+    help=(
+        "Pre-clamp gain for `--delta_action_space com_force`. "
+        "Final applied Fx/Fy/Fz are always clamped to [-1, 1]."
     ),
 )
 parser.add_argument(
@@ -124,6 +134,49 @@ def _configure_delta_action_space(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg
     if joint_pos_cfg is None:
         if args_cli.delta_action_space != "whole_body":
             print("[WARN]: `--delta_action_space` was provided but this task has no `actions.joint_pos` config.")
+        return
+
+    if args_cli.delta_action_space == "com_force":
+        # COM-force mode is currently supported for open-loop delta action tasks.
+        if hasattr(joint_pos_cfg, "motion_command_name") and not hasattr(joint_pos_cfg, "external_action_buffer_name"):
+            import whole_body_tracking.tasks.tracking.mdp as mdp
+
+            force_body_name = getattr(env_cfg.commands.motion, "anchor_body_name", "torso_link")
+            com_force_cfg = mdp.DeltaComForceActionCfg(
+                asset_name=joint_pos_cfg.asset_name,
+                joint_names=joint_pos_cfg.joint_names,
+                use_default_offset=getattr(joint_pos_cfg, "use_default_offset", True),
+                motion_command_name=getattr(joint_pos_cfg, "motion_command_name", "motion"),
+                require_motion_action=getattr(joint_pos_cfg, "require_motion_action", True),
+                force_body_name=force_body_name,
+                force_scale=args_cli.delta_com_force_scale,
+            )
+            if hasattr(joint_pos_cfg, "preserve_order"):
+                com_force_cfg.preserve_order = joint_pos_cfg.preserve_order
+            if hasattr(joint_pos_cfg, "scale"):
+                com_force_cfg.scale = joint_pos_cfg.scale
+            if hasattr(joint_pos_cfg, "offset"):
+                com_force_cfg.offset = joint_pos_cfg.offset
+            if hasattr(joint_pos_cfg, "clip"):
+                com_force_cfg.clip = joint_pos_cfg.clip
+            env_cfg.actions.joint_pos = com_force_cfg
+            # COM-force mode: disable action penalties.
+            if hasattr(env_cfg, "rewards"):
+                if hasattr(env_cfg.rewards, "action_rate_l2"):
+                    env_cfg.rewards.action_rate_l2 = None
+                if hasattr(env_cfg.rewards, "penalty_minimal_action_norm"):
+                    env_cfg.rewards.penalty_minimal_action_norm = None
+            print(
+                "[INFO]: Using COM-force delta action space with 3D force actions "
+                f"(Fx, Fy, Fz), scale={args_cli.delta_com_force_scale} N, body='{force_body_name}'."
+            )
+            print("[INFO]: Disabled action-penalty rewards for COM-force mode.")
+        else:
+            print(
+                "[WARN]: `--delta_action_space com_force` is currently supported only for "
+                "open-loop delta-action tasks. "
+                "Keeping the existing action configuration."
+            )
         return
 
     requested_joint_names = None
