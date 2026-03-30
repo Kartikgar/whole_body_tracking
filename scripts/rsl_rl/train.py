@@ -25,6 +25,17 @@ parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument(
+    "--delta_action_space",
+    type=str,
+    default="whole_body",
+    choices=("whole_body", "ankles", "lower_body"),
+    help=(
+        "Delta-action space mode. `whole_body` keeps current behavior. "
+        "`ankles` uses only ankle joints; `lower_body` uses lower-body joints. "
+        "Both remap outputs into the full-body action vector."
+    ),
+)
+parser.add_argument(
     "--registry_name",
     type=str,
     default=None,
@@ -82,6 +93,76 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
+ANKLE_DELTA_ACTION_JOINT_NAMES = [
+    "left_ankle_pitch_joint",
+    "left_ankle_roll_joint",
+    "right_ankle_pitch_joint",
+    "right_ankle_roll_joint",
+]
+LOWER_BODY_DELTA_ACTION_JOINT_NAMES = [
+    "left_hip_yaw_joint",
+    "left_hip_roll_joint",
+    "left_hip_pitch_joint",
+    "left_knee_joint",
+    "left_ankle_pitch_joint",
+    "left_ankle_roll_joint",
+    "right_hip_yaw_joint",
+    "right_hip_roll_joint",
+    "right_hip_pitch_joint",
+    "right_knee_joint",
+    "right_ankle_pitch_joint",
+    "right_ankle_roll_joint",
+    "waist_yaw_joint",
+    "waist_roll_joint",
+    "waist_pitch_joint",
+]
+
+
+def _configure_delta_action_space(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg):
+    """Apply CLI-selected delta-action space overrides when the env/action cfg supports them."""
+    joint_pos_cfg = getattr(getattr(env_cfg, "actions", None), "joint_pos", None)
+    if joint_pos_cfg is None:
+        if args_cli.delta_action_space != "whole_body":
+            print("[WARN]: `--delta_action_space` was provided but this task has no `actions.joint_pos` config.")
+        return
+
+    requested_joint_names = None
+    if args_cli.delta_action_space == "ankles":
+        requested_joint_names = ANKLE_DELTA_ACTION_JOINT_NAMES.copy()
+    elif args_cli.delta_action_space == "lower_body":
+        requested_joint_names = LOWER_BODY_DELTA_ACTION_JOINT_NAMES.copy()
+
+    applied = False
+    if hasattr(joint_pos_cfg, "delta_action_joint_names"):
+        joint_pos_cfg.delta_action_joint_names = requested_joint_names
+        applied = True
+    if hasattr(joint_pos_cfg, "external_delta_action_joint_names"):
+        joint_pos_cfg.external_delta_action_joint_names = requested_joint_names
+        applied = True
+
+    if args_cli.delta_action_space == "ankles":
+        if applied:
+            print(
+                "[INFO]: Using ankle-only delta action space. "
+                f"Delta joints: {ANKLE_DELTA_ACTION_JOINT_NAMES}."
+            )
+        else:
+            print(
+                "[WARN]: `--delta_action_space ankles` has no effect for this task "
+                "(delta-action fields are not present in the action config)."
+            )
+    elif args_cli.delta_action_space == "lower_body":
+        if applied:
+            print(
+                "[INFO]: Using lower-body delta action space. "
+                f"Delta joints: {LOWER_BODY_DELTA_ACTION_JOINT_NAMES}."
+            )
+        else:
+            print(
+                "[WARN]: `--delta_action_space lower_body` has no effect for this task "
+                "(delta-action fields are not present in the action config)."
+            )
+
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
@@ -97,6 +178,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    _configure_delta_action_space(env_cfg)
 
     # load motion file from local path or wandb registry
     registry_name = None

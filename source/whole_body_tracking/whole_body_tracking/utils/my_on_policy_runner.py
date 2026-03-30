@@ -93,6 +93,28 @@ class MotionOnPolicyRunner(OnPolicyRunner):
                     return int(value.shape[1])
             return None
 
+        def _infer_mlp_output_dim(prefix: str) -> int | None:
+            indexed_layers: list[tuple[int, str, int]] = []
+            for key, value in state_dict.items():
+                if not (key.startswith(f"{prefix}.") and key.endswith(".weight")):
+                    continue
+                if getattr(value, "ndim", None) != 2:
+                    continue
+                layer_name = key[len(prefix) + 1 : -len(".weight")]
+                layer_head = layer_name.split(".", 1)[0]
+                if layer_head.isdigit():
+                    indexed_layers.append((int(layer_head), key, int(value.shape[0])))
+            if not indexed_layers:
+                return None
+            indexed_layers.sort(key=lambda x: (x[0], x[1]))
+            return indexed_layers[-1][2]
+
+        ckpt_action_dim = _infer_mlp_output_dim("actor")
+        if ckpt_action_dim is not None:
+            self._set_delta_action_buffer(torch.zeros(self.env.num_envs, ckpt_action_dim, device=self.env.device))
+        # Keep current-action channel available before first delta-policy obs computation.
+        self._set_delta_base_action_buffer(torch.zeros(self.env.num_envs, self.env.num_actions, device=self.env.device))
+
         obs, extras = self.env.get_observations()
         obs_dict = extras["observations"]
         if self.delta_policy_obs_group not in obs_dict:
@@ -138,7 +160,12 @@ class MotionOnPolicyRunner(OnPolicyRunner):
         else:
             num_critic_obs = num_actor_obs
 
-        num_actions = self.env.num_actions
+        num_actions = ckpt_action_dim if ckpt_action_dim is not None else self.env.num_actions
+        if ckpt_action_dim is not None and ckpt_action_dim != self.env.num_actions:
+            print(
+                "[INFO]: Delta policy action dim mismatch between env and checkpoint "
+                f"({self.env.num_actions} vs {ckpt_action_dim}). Using checkpoint action dim for frozen policy load."
+            )
 
         policy_cfg = dict(delta_agent_cfg["policy"])
         policy_class = eval(policy_cfg.pop("class_name"))
