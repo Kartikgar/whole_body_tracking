@@ -25,6 +25,12 @@ parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument(
+    "--disable_dr",
+    action="store_true",
+    default=False,
+    help="Disable domain randomization (event randomization and observation corruption/noise).",
+)
+parser.add_argument(
     "--delta_action_space",
     type=str,
     default="whole_body",
@@ -217,6 +223,28 @@ def _configure_delta_action_space(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg
             )
 
 
+def _disable_domain_randomization(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg):
+    """Disable DR sources used by these manager-based tracking tasks."""
+    disabled_event_terms = []
+    if hasattr(env_cfg, "events"):
+        for term_name in ("physics_material", "add_joint_default_pos", "base_com", "push_robot"):
+            if hasattr(env_cfg.events, term_name):
+                setattr(env_cfg.events, term_name, None)
+                disabled_event_terms.append(term_name)
+
+    if hasattr(env_cfg, "observations"):
+        for group_name in ("policy", "critic", "delta_policy"):
+            group_cfg = getattr(env_cfg.observations, group_name, None)
+            if group_cfg is not None and hasattr(group_cfg, "enable_corruption"):
+                group_cfg.enable_corruption = False
+
+    print(
+        "[INFO]: DR disabled. "
+        f"Disabled event terms: {disabled_event_terms if disabled_event_terms else 'none'}; "
+        "set observation corruption OFF for available observation groups."
+    )
+
+
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Train with RSL-RL agent."""
@@ -232,6 +260,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     _configure_delta_action_space(env_cfg)
+    if args_cli.disable_dr:
+        _disable_domain_randomization(env_cfg)
 
     # load motion file from local path or wandb registry
     registry_name = None
