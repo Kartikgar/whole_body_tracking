@@ -47,8 +47,17 @@ parser.add_argument(
     type=float,
     default=1.0,
     help=(
-        "Pre-clamp gain for `--delta_action_space com_force`. "
-        "Final applied Fx/Fy/Fz are always clamped to [-1, 1]."
+        "Gain for `--delta_action_space com_force`. "
+        "Force commands are clipped in action space before scaling."
+    ),
+)
+parser.add_argument(
+    "--delta_com_force_clip",
+    type=float,
+    default=1.0,
+    help=(
+        "Symmetric clip bound for `--delta_action_space com_force` in action space, applied before scaling. "
+        "Set <= 0 to disable clipping."
     ),
 )
 parser.add_argument(
@@ -148,6 +157,7 @@ def _configure_delta_action_space(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg
             import whole_body_tracking.tasks.tracking.mdp as mdp
 
             force_body_name = getattr(env_cfg.commands.motion, "anchor_body_name", "torso_link")
+            force_clip = args_cli.delta_com_force_clip if args_cli.delta_com_force_clip > 0.0 else None
             com_force_cfg = mdp.DeltaComForceActionCfg(
                 asset_name=joint_pos_cfg.asset_name,
                 joint_names=joint_pos_cfg.joint_names,
@@ -156,6 +166,7 @@ def _configure_delta_action_space(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg
                 require_motion_action=getattr(joint_pos_cfg, "require_motion_action", True),
                 force_body_name=force_body_name,
                 force_scale=args_cli.delta_com_force_scale,
+                force_clip=force_clip,
             )
             if hasattr(joint_pos_cfg, "preserve_order"):
                 com_force_cfg.preserve_order = joint_pos_cfg.preserve_order
@@ -174,7 +185,8 @@ def _configure_delta_action_space(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg
                     env_cfg.rewards.penalty_minimal_action_norm = None
             print(
                 "[INFO]: Using COM-force delta action space with 3D force actions "
-                f"(Fx, Fy, Fz), scale={args_cli.delta_com_force_scale} N, body='{force_body_name}'."
+                f"(Fx, Fy, Fz), scale={args_cli.delta_com_force_scale} N, "
+                f"clip={force_clip}, body='{force_body_name}'."
             )
             print("[INFO]: Disabled action-penalty rewards for COM-force mode.")
         else:

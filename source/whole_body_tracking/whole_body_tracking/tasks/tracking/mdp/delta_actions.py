@@ -209,17 +209,13 @@ class DeltaComForceAction(ActionTerm):
         return min_tensor, max_tensor
 
     def process_actions(self, actions: torch.Tensor):
-        # Keep policy force commands bounded per-axis.
-        self._raw_actions[:] = torch.clamp(actions, min=-1.0, max=1.0)
+        self._raw_actions[:] = actions
+        if self._force_clip_min is not None and self._force_clip_max is not None:
+            # Optional force clip is applied in action space before scaling.
+            self._raw_actions[:] = torch.clamp(self._raw_actions, min=self._force_clip_min, max=self._force_clip_max)
 
         # Delta policy output controls COM force.
         self._processed_actions = self._raw_actions * self._force_scale
-        if self._force_clip_min is not None and self._force_clip_max is not None:
-            self._processed_actions = torch.clamp(
-                self._processed_actions, min=self._force_clip_min, max=self._force_clip_max
-            )
-        # Hard safety bound required by task setup.
-        self._processed_actions = torch.clamp(self._processed_actions, min=-1.0, max=1.0)
 
         # Joint targets continue to replay motion action (open-loop baseline).
         if self._motion_command.has_joint_action:
