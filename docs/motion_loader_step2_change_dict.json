@@ -1,0 +1,61 @@
+{
+  "title": "Step 2 - Motion Loader Revamp (Per-Motion NPZ Support)",
+  "date": "2026-03-15",
+  "goal": "Enable loading new per-motion NPZ format with variable trajectory lengths while preserving old stacked-format compatibility.",
+  "files_changed": [
+    {
+      "path": "source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py",
+      "changes": [
+        "Reworked MotionLoader to support two input formats: legacy stacked arrays and per-motion dict keys (motion0, motion1, ...).",
+        "Added parsing and validation for per-motion object-dict payloads stored in NPZ.",
+        "Added strict key/shape checks for required motion fields: joint_pos, joint_vel, body_pos_w, body_quat_w, body_lin_vel_w, body_ang_vel_w.",
+        "Added optional action/actions support in per-motion mode with consistency checks across all motions.",
+        "Added per-trajectory length tracking via trajectory_time_step_total tensor.",
+        "Switched to true ragged trajectory storage (no temporal padding) with gather helpers that resolve (trajectory_id, time_step) to flat frame indices.",
+        "Kept MotionCommand/reward call-site behavior unchanged while moving MotionLoader access to explicit gather methods.",
+        "Updated adaptive sampling and episode step wrap logic in MotionCommand to use per-trajectory lengths instead of a single global length."
+      ]
+    },
+    {
+      "path": "scripts/replay_npz.py",
+      "changes": [
+        "Updated replay wrap condition to use selected trajectory length (trajectory_time_step_total) so variable-length motions replay correctly."
+      ]
+    },
+    {
+      "path": "source/whole_body_tracking/whole_body_tracking/utils/exporter.py",
+      "changes": [
+        "Switched ONNX exporter reference extraction to trajectory-based loader API (get_trajectory_data(0)) so export does not depend on stacked padded tensors."
+      ]
+    },
+    {
+      "path": "scripts/convert_motion_npz_to_per_motion.py",
+      "changes": [
+        "Added conversion utility (step 1) that rewrites old stacked NPZ data into motion0/motion1/... object-dict format with native per-motion lengths preserved."
+      ]
+    }
+  ],
+  "new_behavior": {
+    "accepted_formats": [
+      "legacy: top-level keys like joint_pos/joint_vel/body_* with shapes [N,T,...] or [T,...]",
+      "new: top-level motion keys motion0/motion1/... where each entry is a dict with per-motion arrays [T,...]"
+    ],
+    "variable_lengths": "Supported in new format without padding. Per-env wrap/resample and frame lookup use true per-trajectory lengths.",
+    "sampling": "Adaptive bin sampling maps bins against each env's selected trajectory length.",
+    "action_key_handling": "Either all motions provide action/actions, or none; mixed presence raises an error."
+  },
+  "compatibility": {
+    "backward_compatible": true,
+    "notes": [
+      "Existing stacked motion files continue to load unchanged.",
+      "APIs consumed by observation/reward/action terms remain unchanged.",
+      "Per-motion files with inconsistent body count or joint dimensions across motions raise explicit errors."
+    ]
+  },
+  "validation": {
+    "static_checks": [
+      "python -m py_compile source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py scripts/replay_npz.py source/whole_body_tracking/whole_body_tracking/utils/exporter.py scripts/convert_motion_npz_to_per_motion.py"
+    ],
+    "runtime_note": "Direct runtime instantiation of MotionLoader was not executed in this shell because Isaac/Omniverse module omni.kit is unavailable outside simulator environment."
+  }
+}
