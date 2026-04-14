@@ -56,3 +56,27 @@ def bad_motion_body_pos_z_only(
     body_indexes = _get_body_indexes(command, body_names)
     error = torch.abs(command.body_pos_relative_w[:, body_indexes, -1] - command.robot_body_pos_w[:, body_indexes, -1])
     return torch.any(error > threshold, dim=-1)
+
+
+def goal_reached(
+    env: ManagerBasedRLEnv,
+    threshold: float,
+    goal_offset: tuple[float, float, float],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Terminate successful episodes when robot reaches the goal in XY."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    goal_offset_t = torch.tensor(goal_offset, device=env.device, dtype=asset.data.root_pos_w.dtype).unsqueeze(0)
+    goal_pos_w = env.scene.env_origins + goal_offset_t
+    distance_xy = torch.norm(goal_pos_w[:, :2] - asset.data.root_pos_w[:, :2], dim=-1)
+    return distance_xy < threshold
+
+
+def base_height_below(
+    env: ManagerBasedRLEnv,
+    threshold: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Terminate if robot base height drops below threshold (fall condition)."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    return asset.data.root_pos_w[:, 2] < threshold

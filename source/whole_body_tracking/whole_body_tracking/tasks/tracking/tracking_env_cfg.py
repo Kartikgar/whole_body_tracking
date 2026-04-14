@@ -12,7 +12,7 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sensors import ContactSensorCfg, RayCasterCfg
 from isaaclab.terrains import TerrainImporterCfg
 
 ##
@@ -35,6 +35,66 @@ VELOCITY_RANGE = {
     "pitch": (-0.52, 0.52),
     "yaw": (-0.78, 0.78),
 }
+
+
+@configclass
+class HighLevelScanCfg:
+    """Configuration for a local terrain scan around the robot base."""
+
+    front: float = 0.5
+    back: float = 0.5
+    left: float = 0.5
+    right: float = 0.5
+    resolution: float = 0.05
+    include_endpoints: bool = False
+
+    sensor_height: float = 1.0
+    max_distance: float = 5.0
+    no_hit_value: float = 5.0
+
+
+def _resolve_scan_axis_bins(span: float, resolution: float, include_endpoints: bool, axis_name: str) -> tuple[int, float]:
+    if span <= 0.0:
+        raise ValueError(f"Scan span along {axis_name}-axis must be positive. Received: {span}.")
+    if resolution <= 0.0:
+        raise ValueError(f"Scan resolution must be positive. Received: {resolution}.")
+
+    ratio = span / resolution
+    bins = int(round(ratio))
+    if bins <= 0 or abs(ratio - bins) > 1.0e-6:
+        raise ValueError(
+            f"Scan span/resolution mismatch on {axis_name}-axis: span={span}, resolution={resolution}. "
+            "Expected span to be an integer multiple of resolution."
+        )
+
+    if include_endpoints:
+        # Grid includes both endpoints in [-span/2, span/2].
+        return bins + 1, span
+    # Grid uses cell-like sampling (no duplicated endpoints), matching span/resolution shape expectation.
+    return bins, span - resolution
+
+
+def resolve_scan_grid_config(scan_cfg: HighLevelScanCfg) -> tuple[tuple[int, int], tuple[float, float], tuple[float, float]]:
+    """Resolve scan-grid shape, ray-pattern size, and sensor XY offset from scan config."""
+    span_x = scan_cfg.front + scan_cfg.back
+    span_y = scan_cfg.left + scan_cfg.right
+
+    num_x, pattern_size_x = _resolve_scan_axis_bins(
+        span=span_x,
+        resolution=scan_cfg.resolution,
+        include_endpoints=scan_cfg.include_endpoints,
+        axis_name="x",
+    )
+    num_y, pattern_size_y = _resolve_scan_axis_bins(
+        span=span_y,
+        resolution=scan_cfg.resolution,
+        include_endpoints=scan_cfg.include_endpoints,
+        axis_name="y",
+    )
+
+    offset_x = 0.5 * (scan_cfg.front - scan_cfg.back)
+    offset_y = 0.5 * (scan_cfg.left - scan_cfg.right)
+    return (num_x, num_y), (pattern_size_x, pattern_size_y), (offset_x, offset_y)
 
 
 @configclass
@@ -71,6 +131,7 @@ class MySceneCfg(InteractiveSceneCfg):
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*", history_length=3, track_air_time=True, force_threshold=10.0, debug_vis=True
     )
+    terrain_scan: RayCasterCfg | None = None
 
 
 ##

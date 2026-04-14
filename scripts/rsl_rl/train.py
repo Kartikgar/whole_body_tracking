@@ -72,6 +72,18 @@ parser.add_argument(
     default=None,
     help="Optional local path to motion .npz. If provided, wandb registry is skipped.",
 )
+parser.add_argument(
+    "--low_level_policy_1_checkpoint",
+    type=str,
+    default=None,
+    help="Path to frozen low-level policy #1 checkpoint for hierarchical switch tasks.",
+)
+parser.add_argument(
+    "--low_level_policy_2_checkpoint",
+    type=str,
+    default=None,
+    help="Path to frozen low-level policy #2 checkpoint for hierarchical switch tasks.",
+)
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -257,6 +269,47 @@ def _disable_domain_randomization(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg
     )
 
 
+def _configure_hierarchical_switch_policies(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg):
+    """Apply CLI checkpoint overrides for hierarchical high-level switch action tasks."""
+    joint_pos_cfg = getattr(getattr(env_cfg, "actions", None), "joint_pos", None)
+    if joint_pos_cfg is None:
+        return
+    if not (hasattr(joint_pos_cfg, "policy_1_checkpoint") and hasattr(joint_pos_cfg, "policy_2_checkpoint")):
+        return
+
+    if args_cli.low_level_policy_1_checkpoint is not None:
+        ckpt_1 = os.path.abspath(os.path.expanduser(args_cli.low_level_policy_1_checkpoint))
+        if not os.path.isfile(ckpt_1):
+            raise FileNotFoundError(f"Low-level policy #1 checkpoint not found: {ckpt_1}")
+        joint_pos_cfg.policy_1_checkpoint = ckpt_1
+
+    if args_cli.low_level_policy_2_checkpoint is not None:
+        ckpt_2 = os.path.abspath(os.path.expanduser(args_cli.low_level_policy_2_checkpoint))
+        if not os.path.isfile(ckpt_2):
+            raise FileNotFoundError(f"Low-level policy #2 checkpoint not found: {ckpt_2}")
+        joint_pos_cfg.policy_2_checkpoint = ckpt_2
+
+    if not getattr(joint_pos_cfg, "policy_1_checkpoint", "") or not getattr(joint_pos_cfg, "policy_2_checkpoint", ""):
+        raise ValueError(
+            "Hierarchical switch task requires both low-level checkpoints. Provide "
+            "`--low_level_policy_1_checkpoint` and `--low_level_policy_2_checkpoint`."
+        )
+
+    print(
+        "[INFO]: Hierarchical switch policies configured: "
+        f"policy_1='{joint_pos_cfg.policy_1_checkpoint}', "
+        f"policy_2='{joint_pos_cfg.policy_2_checkpoint}'."
+    )
+
+
+def _has_motion_command(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> bool:
+    return bool(
+        hasattr(env_cfg, "commands")
+        and hasattr(env_cfg.commands, "motion")
+        and getattr(env_cfg.commands, "motion", None) is not None
+    )
+
+
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Train with RSL-RL agent."""
@@ -272,31 +325,36 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     _configure_delta_action_space(env_cfg)
+    _configure_hierarchical_switch_policies(env_cfg)
     if args_cli.disable_dr:
         _disable_domain_randomization(env_cfg)
 
-    # load motion file from local path or wandb registry
     registry_name = None
-    if args_cli.motion_file is not None:
-        motion_file = os.path.abspath(os.path.expanduser(args_cli.motion_file))
-        if not os.path.isfile(motion_file):
-            raise FileNotFoundError(f"Motion file not found: {motion_file}")
-        print(f"[INFO]: Using local motion file: {motion_file}")
-        env_cfg.commands.motion.motion_file = motion_file
+    # load motion file from local path or wandb registry (only for tasks that use motion command)
+    if _has_motion_command(env_cfg):
+        if args_cli.motion_file is not None:
+            motion_file = os.path.abspath(os.path.expanduser(args_cli.motion_file))
+            if not os.path.isfile(motion_file):
+                raise FileNotFoundError(f"Motion file not found: {motion_file}")
+            print(f"[INFO]: Using local motion file: {motion_file}")
+            env_cfg.commands.motion.motion_file = motion_file
+        else:
+            if args_cli.registry_name is None:
+                raise ValueError("Provide --motion_file, or provide --registry_name to fetch motion.npz from wandb.")
+            registry_name = args_cli.registry_name
+            if ":" not in registry_name:  # Check if the registry name includes alias, if not, append ":latest"
+                registry_name += ":latest"
+            import pathlib
+
+            import wandb
+
+            print(f"[INFO]: Downloading motion artifact from wandb: {registry_name}")
+            api = wandb.Api()
+            artifact = api.artifact(registry_name)
+            env_cfg.commands.motion.motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
     else:
-        if args_cli.registry_name is None:
-            raise ValueError("Provide --motion_file, or provide --registry_name to fetch motion.npz from wandb.")
-        registry_name = args_cli.registry_name
-        if ":" not in registry_name:  # Check if the registry name includes alias, if not, append ":latest"
-            registry_name += ":latest"
-        import pathlib
-
-        import wandb
-
-        print(f"[INFO]: Downloading motion artifact from wandb: {registry_name}")
-        api = wandb.Api()
-        artifact = api.artifact(registry_name)
-        env_cfg.commands.motion.motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
+        if args_cli.motion_file is not None or args_cli.registry_name is not None:
+            print("[INFO]: This task has no motion command; ignoring --motion_file/--registry_name.")
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)

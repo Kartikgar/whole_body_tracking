@@ -57,3 +57,10 @@ class G1FlatDeltaAFineTunePPORunnerCfg(G1FlatPPORunnerCfg):
     delta_policy_base_action_buffer_name: str = "delta_base_actions"
     delta_policy_require: bool = True
     delta_policy_clip_actions: float | None = None
+
+
+@configclass
+class G1GapSwitchHierPPORunnerCfg(G1FlatPPORunnerCfg):
+    experiment_name = "g1_gap_switch_hier"
+    max_iterations = 20000
+    save_interval = 500

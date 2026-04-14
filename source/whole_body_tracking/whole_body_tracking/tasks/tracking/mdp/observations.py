@@ -4,8 +4,8 @@ import torch
 from typing import TYPE_CHECKING
 
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.sensors import ContactSensor
-from isaaclab.utils.math import matrix_from_quat, subtract_frame_transforms
+from isaaclab.sensors import ContactSensor, RayCaster
+from isaaclab.utils.math import matrix_from_quat, quat_rotate_inverse, subtract_frame_transforms
 
 from whole_body_tracking.tasks.tracking.mdp.commands import MotionCommand
 
@@ -117,3 +117,89 @@ def feet_contact_force(env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg) -> torc
     # Use the latest sample from sensor history for observation.
     feet_forces_w = net_forces_w_history[:, -1, :, :]
     return feet_forces_w.reshape(env.num_envs, -1)
+
+
+def terrain_scan_points_b(
+    env: ManagerBasedEnv,
+    sensor_cfg: SceneEntityCfg,
+    grid_shape: tuple[int, int],
+    no_hit_value: float = 10.0,
+    flatten: bool = False,
+) -> torch.Tensor:
+    """Ray-cast hit points in the sensor frame as a (HxWx3) scan matrix.
+
+    Args:
+        env: The environment.
+        sensor_cfg: Scene entity config for the ray-caster sensor.
+        grid_shape: Expected grid shape as (num_x, num_y).
+        no_hit_value: Fallback value for rays with no valid hit.
+        flatten: If True, return a flattened vector [B, H*W*3].
+
+    Returns:
+        Tensor with shape [B, H, W, 3] if ``flatten=False`` else [B, H*W*3].
+    """
+    sensor: RayCaster = env.scene.sensors[sensor_cfg.name]
+    ray_hits_w = sensor.data.ray_hits_w
+
+    num_x, num_y = int(grid_shape[0]), int(grid_shape[1])
+    expected_num_rays = num_x * num_y
+    if ray_hits_w.shape[1] != expected_num_rays:
+        raise RuntimeError(
+            "Scan grid shape mismatch with ray-caster pattern: "
+            f"expected {expected_num_rays} rays for grid_shape={grid_shape}, got {ray_hits_w.shape[1]} rays."
+        )
+
+    sensor_pos_w = sensor.data.pos_w.unsqueeze(1)
+    relative_hits_w = ray_hits_w - sensor_pos_w
+
+    # Some rays may miss the terrain and produce non-finite values.
+    valid_mask = torch.isfinite(relative_hits_w).all(dim=-1, keepdim=True)
+    safe_relative_hits_w = torch.where(valid_mask, relative_hits_w, torch.zeros_like(relative_hits_w))
+
+    num_rays = ray_hits_w.shape[1]
+    sensor_quat_w = sensor.data.quat_w.unsqueeze(1).expand(-1, num_rays, -1)
+    relative_hits_b = quat_rotate_inverse(
+        sensor_quat_w.reshape(-1, 4), safe_relative_hits_w.reshape(-1, 3)
+    ).reshape(env.num_envs, num_rays, 3)
+
+    if torch.any(~valid_mask):
+        fallback_hits_b = torch.full_like(relative_hits_b, fill_value=no_hit_value)
+        fallback_hits_b[..., 2] = 0.0
+        relative_hits_b = torch.where(valid_mask.expand_as(relative_hits_b), relative_hits_b, fallback_hits_b)
+
+    scan_matrix = relative_hits_b.view(env.num_envs, num_x, num_y, 3)
+    if flatten:
+        return scan_matrix.reshape(env.num_envs, -1)
+    return scan_matrix
+
+
+def terrain_scan_points_b_flat(
+    env: ManagerBasedEnv,
+    sensor_cfg: SceneEntityCfg,
+    grid_shape: tuple[int, int],
+    no_hit_value: float = 10.0,
+) -> torch.Tensor:
+    """Flattened version of :func:`terrain_scan_points_b` for MLP-style policies."""
+    return terrain_scan_points_b(
+        env=env,
+        sensor_cfg=sensor_cfg,
+        grid_shape=grid_shape,
+        no_hit_value=no_hit_value,
+        flatten=True,
+    )
+
+
+def goal_position_b(
+    env: ManagerBasedEnv,
+    goal_offset: tuple[float, float, float],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Goal position expressed in the robot base frame.
+
+    The goal is specified as an offset from each environment origin.
+    """
+    asset = env.scene[asset_cfg.name]
+    goal_offset_t = torch.tensor(goal_offset, device=env.device, dtype=asset.data.root_pos_w.dtype).unsqueeze(0)
+    goal_pos_w = env.scene.env_origins + goal_offset_t
+    goal_vec_w = goal_pos_w - asset.data.root_pos_w
+    return quat_rotate_inverse(asset.data.root_quat_w, goal_vec_w)

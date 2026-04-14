@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
+from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
 from isaaclab.utils.math import quat_error_magnitude
@@ -37,6 +38,7 @@ def motion_relative_body_position_error_exp(
     error = torch.sum(
         torch.square(command.body_pos_relative_w[:, body_indexes] - command.robot_body_pos_w[:, body_indexes]), dim=-1
     )
+    # import ipdb;ipdb.set_trace()
     return torch.exp(-error.mean(-1) / std**2)
 
 
@@ -58,6 +60,7 @@ def motion_global_body_position_error_exp(
     command: MotionCommand = env.command_manager.get_term(command_name)
     body_indexes = _get_body_indexes(command, body_names)
     error = torch.sum(torch.square(command.body_pos_w[:, body_indexes] - command.robot_body_pos_w[:, body_indexes]), dim=-1)
+    # import ipdb;ipdb.set_trace() 
     return torch.exp(-error.mean(-1) / std**2)
 
 
@@ -103,3 +106,34 @@ def feet_contact_time(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, thresh
 def penalty_minimal_action_norm(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Delta-action regularizer: exp(-||a_delta||) - 1."""
     return torch.exp(-torch.norm(env.action_manager.action, dim=-1)) - 1.0
+
+
+def _goal_distance_xy(
+    env: ManagerBasedRLEnv, goal_offset: tuple[float, float, float], asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    goal_offset_t = torch.tensor(goal_offset, device=env.device, dtype=asset.data.root_pos_w.dtype).unsqueeze(0)
+    goal_pos_w = env.scene.env_origins + goal_offset_t
+    return torch.norm(goal_pos_w[:, :2] - asset.data.root_pos_w[:, :2], dim=-1)
+
+
+def goal_position_error_tanh(
+    env: ManagerBasedRLEnv,
+    std: float,
+    goal_offset: tuple[float, float, float],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Dense reward for getting closer to the goal on the far side of the gaps."""
+    distance_xy = _goal_distance_xy(env, goal_offset, asset_cfg)
+    return 1.0 - torch.tanh(distance_xy / std)
+
+
+def goal_reached_bonus(
+    env: ManagerBasedRLEnv,
+    threshold: float,
+    goal_offset: tuple[float, float, float],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Sparse success reward when the robot reaches the goal."""
+    distance_xy = _goal_distance_xy(env, goal_offset, asset_cfg)
+    return (distance_xy < threshold).float()
