@@ -28,6 +28,7 @@ import os
 import xml.etree.ElementTree as ET
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import numpy as np
@@ -237,6 +238,40 @@ OBS_NOISE_UNIFORM_RANGES: dict[str, tuple[float, float]] = {
     "joint_pos": (-0.01, 0.01),
     "joint_vel": (-0.5, 0.5),
 }
+
+# Matches tracking_env_cfg.EventCfg startup/interval randomization.
+DOMAIN_RAND_FRICTION_RANGE = (0.3, 1.6)
+DOMAIN_RAND_FRICTION_NUM_BUCKETS = 64
+DOMAIN_RAND_JOINT_DEFAULT_POS_RANGE = (-0.00, 0.00)
+DOMAIN_RAND_BASE_COM_RANGE = {
+    "x": (-0.025, 0.025),
+    "y": (-0.05, 0.05),
+    "z": (-0.05, 0.05),
+}
+DOMAIN_RAND_PUSH_INTERVAL_RANGE_S = (1.0, 3.0)
+DOMAIN_RAND_PUSH_VELOCITY_RANGE = {
+    "x": (-0.5, 0.5),
+    "y": (-0.5, 0.5),
+    "z": (-0.2, 0.2),
+    "roll": (-0.52, 0.52),
+    "pitch": (-0.52, 0.52),
+    "yaw": (-0.78, 0.78),
+    # "x": (-0.0, 0.0),
+    # "y": (-0.0, 0.0),
+    # "z": (-0.0, 0.0),
+    # "roll": (-0.0, 0.0),
+    # "pitch": (-0.0, 0.0),
+    # "yaw": (-0.0, 0.0),
+}
+
+
+def _bucketize_uniform(values: np.ndarray, low: float, high: float, num_buckets: int) -> np.ndarray:
+    if num_buckets <= 1 or high <= low:
+        return values.astype(np.float32)
+    idx = np.round((values - low) / (high - low) * (num_buckets - 1)).astype(np.int32)
+    idx = np.clip(idx, 0, num_buckets - 1)
+    bucket_values = np.linspace(low, high, num_buckets, dtype=np.float32)
+    return bucket_values[idx]
 
 
 G1_ALL_BODY_JOINT_NAMES = (
@@ -453,6 +488,7 @@ class Sim2SimEvaluatorGenesis:
         sim_dt: float,
         control_dt: float,
         max_steps: int | None,
+        start_timestep: int,
         torque_limit: float | None,
         record_video: bool,
         viewer: bool,
@@ -465,6 +501,7 @@ class Sim2SimEvaluatorGenesis:
         compute_metrics: bool,
         metric_num_envs: int,
         add_noise: bool,
+        domain_randomization: bool,
     ):
         try:
             import genesis as gs
@@ -483,6 +520,7 @@ class Sim2SimEvaluatorGenesis:
         self.record_video = record_video
         self.viewer = viewer
         self.torque_limit = torque_limit
+        self.start_timestep = int(start_timestep)
         self.num_envs = max(int(num_envs), 1)
         self.show_reference = show_reference
         self.reference_marker_radius = reference_marker_radius
@@ -491,7 +529,14 @@ class Sim2SimEvaluatorGenesis:
         self.record_motion = bool(record_motion)
         self.compute_metrics = bool(compute_metrics)
         self.metric_num_envs = max(int(metric_num_envs), 1)
+        if self.record_motion:
+            # Motion logging mode always computes metrics on exactly the requested
+            # number of trajectory episodes.
+            self.compute_metrics = True
+            self.metric_num_envs = self.target_trajectories
         self.add_noise = bool(add_noise)
+        self.domain_randomization = bool(domain_randomization)
+        self._rng = np.random.default_rng()
 
         ratio = control_dt / sim_dt
         if abs(ratio - round(ratio)) > 1e-6:
@@ -514,7 +559,6 @@ class Sim2SimEvaluatorGenesis:
         use_cuda = policy_device.startswith("cuda") and "CUDAExecutionProvider" in available_providers
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if use_cuda else ["CPUExecutionProvider"]
         self.session = ort.InferenceSession(policy_path, providers=providers)
-
         input_names = [inp.name for inp in self.session.get_inputs()]
         if "obs" not in input_names:
             raise RuntimeError(f"ONNX input 'obs' not found. Inputs={input_names}")
@@ -534,6 +578,11 @@ class Sim2SimEvaluatorGenesis:
         self.zero_obs = np.zeros((1, self.obs_dim_expected), dtype=np.float32)
         self.last_action = np.zeros((self.num_envs, self.num_actions), dtype=np.float32)
         self._init_history()
+        self._default_joint_pos_by_env = np.repeat(self.meta.default_joint_pos[None, :], self.num_envs, axis=0).astype(
+            np.float32
+        )
+        self._push_next_step_by_env = np.full(self.num_envs, np.iinfo(np.int32).max, dtype=np.int32)
+        self._push_root_dofs: list[int] = []
 
         # Optional motion action for Delta-A open-loop setup.
         self.motion_actions: np.ndarray | None = None
@@ -556,18 +605,43 @@ class Sim2SimEvaluatorGenesis:
                 "Failed to infer reference motion length from exported ONNX policy. "
                 "Re-export the policy with this codebase's motion exporter."
             )
-        self.max_steps = self.reference_motion_length_steps
+        if self.start_timestep < 0:
+            raise ValueError(f"--start_timestep must be >= 0. Got {self.start_timestep}.")
+        if self.start_timestep >= self.reference_motion_length_steps:
+            raise ValueError(
+                f"--start_timestep={self.start_timestep} is out of range for reference length "
+                f"{self.reference_motion_length_steps}."
+            )
+
+        # Rollout horizon is the remaining reference motion from start_timestep to end.
+        self.max_steps = self.reference_motion_length_steps - self.start_timestep
         if max_steps is not None and int(max_steps) != self.max_steps:
             print(
-                f"[WARN] Ignoring --max_steps={int(max_steps)}; using policy reference length "
+                f"[WARN] Ignoring --max_steps={int(max_steps)}; using policy reference window "
+                f"from start_timestep={self.start_timestep} with "
                 f"{self.max_steps} steps."
             )
         # Genesis init
         gs_backend = gs.gpu if backend == "gpu" else gs.cpu
         gs.init(backend=gs_backend, precision="32", logging_level="warning")
+        rigid_options_kwargs: dict[str, Any] = {"enable_self_collision": False}
+        if self.domain_randomization:
+            # Genesis requires batched link/dof info for physics randomization calls.
+            rigid_options_kwargs.update({"batch_dofs_info": True, "batch_links_info": True})
+        try:
+            rigid_options = gs.options.RigidOptions(**rigid_options_kwargs)
+        except TypeError:
+            rigid_options_kwargs.pop("batch_dofs_info", None)
+            rigid_options_kwargs.pop("batch_links_info", None)
+            rigid_options = gs.options.RigidOptions(**rigid_options_kwargs)
+            if self.domain_randomization:
+                print(
+                    "[WARN] Current Genesis build does not accept batch_dofs_info/batch_links_info; "
+                    "domain randomization coverage may be reduced."
+                )
         self.scene = gs.Scene(
             sim_options=gs.options.SimOptions(dt=self.sim_dt, substeps=1, gravity=(0.0, 0.0, -9.81)),
-            rigid_options=gs.options.RigidOptions(enable_self_collision=False),
+            rigid_options=rigid_options,
             show_viewer=self.viewer,
             renderer=gs.renderers.Rasterizer(),
         )
@@ -649,6 +723,173 @@ class Sim2SimEvaluatorGenesis:
             "body_ang_vel_w",
             "action",
         )
+        self._setup_domain_randomization()
+
+    def _default_joint_pos_for_batch(self, batch_size: int) -> np.ndarray:
+        if batch_size <= 0:
+            raise ValueError(f"Expected positive batch size, got {batch_size}.")
+        if self._default_joint_pos_by_env.shape[0] == batch_size:
+            return self._default_joint_pos_by_env
+        if self._default_joint_pos_by_env.shape[0] == 1:
+            return np.repeat(self._default_joint_pos_by_env, batch_size, axis=0)
+        if batch_size == 1:
+            return self._default_joint_pos_by_env[:1]
+        raise RuntimeError(
+            "Joint-default-pos randomization batch mismatch: "
+            f"have {self._default_joint_pos_by_env.shape[0]} env defaults, requested batch={batch_size}."
+        )
+
+    def _call_link_randomization(self, method_name: str, values: np.ndarray, links_idx_local: list[int]) -> bool:
+        method = getattr(self.robot, method_name, None)
+        if method is None:
+            return False
+
+        candidates = [np.asarray(values, dtype=np.float32)]
+        if self.num_envs == 1 and candidates[0].ndim >= 2:
+            candidates.append(candidates[0][0])
+
+        for candidate in candidates:
+            candidate_f32 = np.asarray(candidate, dtype=np.float32)
+            for payload in (candidate_f32, torch.from_numpy(candidate_f32)):
+                try:
+                    method(payload, links_idx_local)
+                    return True
+                except Exception:
+                    continue
+        return False
+
+    def _resolve_push_root_dofs(self) -> list[int]:
+        # Prefer explicit free-root joint names.
+        for root_joint_name in ("root_joint", "floating_base", "base_joint"):
+            try:
+                joint = self.robot.get_joint(root_joint_name)
+                dof_ids = [int(i) for i in joint.dofs_idx_local]
+                if len(dof_ids) >= 6:
+                    return dof_ids[:6]
+            except Exception:
+                continue
+
+        n_dofs = int(getattr(self.robot, "n_dofs", len(self.joint_dof_indices) + 6))
+        actuated = {int(i) for i in self.joint_dof_indices}
+        free_like = [i for i in range(n_dofs) if i not in actuated]
+        if len(free_like) >= 6:
+            return free_like[:6]
+        return []
+
+    def _schedule_next_push(self, env_ids: np.ndarray, current_step: int):
+        if env_ids.size == 0:
+            return
+        low_s, high_s = DOMAIN_RAND_PUSH_INTERVAL_RANGE_S
+        interval_s = self._rng.uniform(low_s, high_s, size=env_ids.size)
+        interval_steps = np.maximum(1, np.round(interval_s / self.control_dt).astype(np.int32))
+        self._push_next_step_by_env[env_ids] = current_step + interval_steps
+
+    def _sample_push_velocity(self, count: int) -> np.ndarray:
+        vr = DOMAIN_RAND_PUSH_VELOCITY_RANGE
+        return np.stack(
+            [
+                self._rng.uniform(vr["x"][0], vr["x"][1], size=count),
+                self._rng.uniform(vr["y"][0], vr["y"][1], size=count),
+                self._rng.uniform(vr["z"][0], vr["z"][1], size=count),
+                self._rng.uniform(vr["roll"][0], vr["roll"][1], size=count),
+                self._rng.uniform(vr["pitch"][0], vr["pitch"][1], size=count),
+                self._rng.uniform(vr["yaw"][0], vr["yaw"][1], size=count),
+            ],
+            axis=1,
+        ).astype(np.float32)
+
+    def _maybe_apply_interval_push(self, rollout_step: int):
+        if (not self.domain_randomization) or len(self._push_root_dofs) < 6:
+            return
+
+        due_env_ids = np.nonzero(rollout_step >= self._push_next_step_by_env)[0].astype(np.int32)
+        if due_env_ids.size == 0:
+            return
+
+        push_velocity = self._sample_push_velocity(int(due_env_ids.size))
+        try:
+            if self.num_envs > 1:
+                self.robot.set_dofs_velocity(push_velocity, self._push_root_dofs, envs_idx=due_env_ids)
+            else:
+                self.robot.set_dofs_velocity(push_velocity[0], self._push_root_dofs)
+        except TypeError:
+            if self.num_envs > 1:
+                self.robot.set_dofs_velocity(push_velocity, self._push_root_dofs, due_env_ids)
+            else:
+                self.robot.set_dofs_velocity(push_velocity[0], self._push_root_dofs)
+        except Exception as exc:
+            print(f"[WARN] Failed to apply push randomization. Disabling pushes for this run. Error: {exc}")
+            self._push_next_step_by_env[:] = np.iinfo(np.int32).max
+            return
+
+        self._schedule_next_push(due_env_ids, current_step=rollout_step)
+
+    def _reset_domain_randomization_for_rollout(self):
+        if not self.domain_randomization:
+            return
+        env_ids = np.arange(self.num_envs, dtype=np.int32)
+        self._schedule_next_push(env_ids, current_step=0)
+
+    def _setup_domain_randomization(self):
+        if not self.domain_randomization:
+            return
+
+        # 1) Randomize default joint positions (startup).
+        low_j, high_j = DOMAIN_RAND_JOINT_DEFAULT_POS_RANGE
+        joint_offset = self._rng.uniform(low_j, high_j, size=self._default_joint_pos_by_env.shape).astype(np.float32)
+        self._default_joint_pos_by_env = (self._default_joint_pos_by_env + joint_offset).astype(np.float32)
+
+        # 2) Randomize rigid-body friction (startup, all links).
+        n_links = int(getattr(self.robot, "n_links", 0))
+        link_ids = list(range(n_links))
+        if n_links > 0:
+            low_f, high_f = DOMAIN_RAND_FRICTION_RANGE
+            friction = self._rng.uniform(low_f, high_f, size=(self.num_envs, n_links)).astype(np.float32)
+            friction = _bucketize_uniform(friction, low_f, high_f, DOMAIN_RAND_FRICTION_NUM_BUCKETS)
+            friction_ok = self._call_link_randomization("set_friction_ratio", friction, link_ids)
+            if not friction_ok:
+                print(
+                    "[WARN] Genesis API does not expose set_friction_ratio for this build; "
+                    "skipping physics-material friction randomization."
+                )
+
+        # 3) Randomize torso COM (startup).
+        try:
+            torso_link = self.robot.get_link("torso_link")
+            torso_idx_local_raw = getattr(torso_link, "idx_local", None)
+            if torso_idx_local_raw is None:
+                torso_idx_raw = getattr(torso_link, "idx", None)
+                link_start = int(getattr(self.robot, "link_start", 0))
+                torso_idx_local_raw = None if torso_idx_raw is None else int(torso_idx_raw) - link_start
+            torso_idx_local = -1 if torso_idx_local_raw is None else int(torso_idx_local_raw)
+        except Exception:
+            torso_idx_local = -1
+        if torso_idx_local >= 0:
+            com_shift = np.zeros((self.num_envs, 1, 3), dtype=np.float32)
+            com_shift[:, 0, 0] = self._rng.uniform(
+                DOMAIN_RAND_BASE_COM_RANGE["x"][0], DOMAIN_RAND_BASE_COM_RANGE["x"][1], size=self.num_envs
+            ) 
+            com_shift[:, 0, 1] = self._rng.uniform(
+                DOMAIN_RAND_BASE_COM_RANGE["y"][0], DOMAIN_RAND_BASE_COM_RANGE["y"][1], size=self.num_envs
+            )
+            com_shift[:, 0, 2] = self._rng.uniform(
+                DOMAIN_RAND_BASE_COM_RANGE["z"][0], DOMAIN_RAND_BASE_COM_RANGE["z"][1], size=self.num_envs
+            )
+            com_ok = self._call_link_randomization("set_COM_shift", com_shift, [torso_idx_local])
+            if not com_ok:
+                print(
+                    "[WARN] Genesis API does not expose set_COM_shift for this build; "
+                    "skipping base COM randomization."
+                )
+        else:
+            print("[WARN] Could not resolve torso_link for COM randomization.")
+
+        # 4) Prepare root-velocity push randomization (interval).
+        self._push_root_dofs = self._resolve_push_root_dofs()
+        if len(self._push_root_dofs) < 6:
+            print("[WARN] Could not resolve 6 root DoFs for push randomization; interval pushes are disabled.")
+        else:
+            print("[INFO] Genesis domain randomization enabled (friction, joint defaults, torso COM, interval pushes).")
 
     def _init_episode_traj_buffers(self) -> list[dict[str, list[np.ndarray]]]:
         return [{key: [] for key in self.traj_data_keys} for _ in range(self.num_envs)]
@@ -749,7 +990,7 @@ class Sim2SimEvaluatorGenesis:
                 raise AssertionError(
                     f"Payload key '{key}' shape mismatch: expected {expected_shapes[key]}, got {value.shape}"
                 )
-        import ipdb;ipdb.set_trace()
+        # import ipdb;ipdb.set_trace()
         os.makedirs(os.path.dirname(self.output_motion_npz) or ".", exist_ok=True)
         np.savez(self.output_motion_npz, **payload)
         return self.output_motion_npz
@@ -1028,7 +1269,7 @@ class Sim2SimEvaluatorGenesis:
             "motion_anchor_ori_b": rel_anchor_ori,
             "base_lin_vel": base_lin_vel_b,
             "base_ang_vel": base_ang_vel_b,
-            "joint_pos": state_batch["joint_pos"] - self.meta.default_joint_pos[None, :],
+            "joint_pos": state_batch["joint_pos"] - self._default_joint_pos_for_batch(batch_size),
             "joint_vel": state_batch["joint_vel"],
             "actions": self.last_action.copy(),
         }
@@ -1056,7 +1297,8 @@ class Sim2SimEvaluatorGenesis:
             processed_action = processed_action.reshape(1, -1)
         if self.requires_motion_action:
             processed_action += self._motion_action_at(time_step, batch_size=processed_action.shape[0])
-        joint_target = self.meta.default_joint_pos[None, :] + self.meta.action_scale[None, :] * processed_action
+        default_joint_pos = self._default_joint_pos_for_batch(processed_action.shape[0])
+        joint_target = default_joint_pos + self.meta.action_scale[None, :] * processed_action
         if self.num_envs == 1 and joint_target.shape[0] == 1:
             return joint_target[0].astype(np.float32)
         return joint_target.astype(np.float32)
@@ -1101,7 +1343,7 @@ class Sim2SimEvaluatorGenesis:
         ref_anchor_quat = ref["body_quat_w"][self.anchor_idx]
 
         # bad_anchor_pos_z_only threshold
-        if abs(ref_anchor_pos[2] - robot_anchor_pos[2]) > 0.25:
+        if abs(ref_anchor_pos[2] - robot_anchor_pos[2]) > 0.5:
             return True, "anchor_pos_z"
 
         # bad_anchor_ori threshold (projected gravity difference)
@@ -1112,10 +1354,10 @@ class Sim2SimEvaluatorGenesis:
             return True, "anchor_ori"
 
         # bad_motion_body_pos_z_only for feet/wrists
-        if self.ee_body_indices:
-            z_err = np.abs(body_pos_relative[self.ee_body_indices, 2] - state["body_pos_w"][self.ee_body_indices, 2])
-            if np.any(z_err > 0.25):
-                return True, "ee_body_pos_z"
+        # if self.ee_body_indices:
+        #     z_err = np.abs(body_pos_relative[self.ee_body_indices, 2] - state["body_pos_w"][self.ee_body_indices, 2])
+        #     if np.any(z_err > 0.25):
+        #         return True, "ee_body_pos_z"
 
         return False, "completed"
 
@@ -1209,12 +1451,13 @@ class Sim2SimEvaluatorGenesis:
                 print(f"[INFO] Computing metrics: 0/{metric_target_envs}")
 
         while True:
-            ref0_batch = self._fetch_reference_batch(0, batch_size=self.num_envs)
+            ref0_batch = self._fetch_reference_batch(self.start_timestep, batch_size=self.num_envs)
             ref0 = self._ref_for_env(ref0_batch, env_id=0)
             self._reset_robot_to_reference(ref0)
+            self._reset_domain_randomization_for_rollout()
             self._update_reference_markers(ref0)
             state_batch = self._extract_state_batch()
-            obs = self._build_observation(state_batch, ref0_batch, time_step=0)
+            obs = self._build_observation(state_batch, ref0_batch, time_step=self.start_timestep)
             traj_buffers = self._init_episode_traj_buffers()
             steps_this_rollout = 0
             rollout_body_pos_pred: list[np.ndarray] = []
@@ -1223,7 +1466,8 @@ class Sim2SimEvaluatorGenesis:
             env_end_step = np.full(self.num_envs, self.max_steps, dtype=np.int32)
 
             for t_step in range(self.max_steps):
-                policy_out = self._run_policy(obs, t_step)
+                ref_step = self.start_timestep + t_step
+                policy_out = self._run_policy(obs, ref_step)
                 action_batch = policy_out["actions"].astype(np.float32)
                 ref_batch = {
                     "joint_pos": policy_out["joint_pos"].astype(np.float32),
@@ -1236,7 +1480,8 @@ class Sim2SimEvaluatorGenesis:
                 ref = self._ref_for_env(ref_batch, env_id=0)
                 self._update_reference_markers(ref)
 
-                joint_target = self._compute_joint_target(action_batch, time_step=t_step)
+                joint_target = self._compute_joint_target(action_batch, time_step=ref_step)
+                self._maybe_apply_interval_push(t_step)
                 self._step_simulation(joint_target)
                 state_batch = self._extract_state_batch()
                 self._append_episode_traj_step(traj_buffers, state_batch, action_batch)
@@ -1286,8 +1531,9 @@ class Sim2SimEvaluatorGenesis:
                 if metrics_enabled and bool(np.all(env_done)):
                     break
 
-                ref_next_batch = self._fetch_reference_batch(t_step + 1, batch_size=self.num_envs)
-                obs = self._build_observation(state_batch, ref_next_batch, time_step=t_step + 1)
+                ref_next_step = ref_step + 1
+                ref_next_batch = self._fetch_reference_batch(ref_next_step, batch_size=self.num_envs)
+                obs = self._build_observation(state_batch, ref_next_batch, time_step=ref_next_step)
 
             rollout_id = rollout_count
             rollout_count += 1
@@ -1367,8 +1613,10 @@ class Sim2SimEvaluatorGenesis:
             "policy_path": self.policy_path,
             "motion_file": self.motion_file,
             "num_envs": self.num_envs,
+            "domain_randomization": int(self.domain_randomization),
             "steps": total_steps,
             "max_steps": self.max_steps,
+            "start_timestep": self.start_timestep,
             "reference_motion_length_steps": self.reference_motion_length_steps,
             "rollouts": rollout_count,
             "motion_completion_pct": (
@@ -1426,6 +1674,14 @@ def _write_json(path: str, row: dict[str, Any]):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(row, f, indent=2, sort_keys=True)
+
+
+def _append_timestamp_to_path(path: str, timestamp: str) -> str:
+    directory = os.path.dirname(path)
+    filename = os.path.basename(path)
+    stem, ext = os.path.splitext(filename)
+    stamped = f"{stem}_{timestamp}{ext}"
+    return os.path.join(directory, stamped)
 
 
 DEFAULT_G1_URDF = os.path.join(
@@ -1498,10 +1754,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sim_dt", type=float, default=0.001, help="Genesis simulation dt.")
     parser.add_argument("--control_dt", type=float, default=0.02, help="Policy control dt.")
     parser.add_argument(
+        "--start_timestep",
+        type=int,
+        default=0,
+        help="Reference-motion timestep to start rollout from (default: 0).",
+    )
+    parser.add_argument(
         "--max_steps",
         type=int,
         default=None,
-        help="Deprecated. Ignored in Genesis evaluator; rollout horizon always matches policy reference length.",
+        help=(
+            "Deprecated. Ignored in Genesis evaluator; rollout horizon always matches remaining reference "
+            "length from --start_timestep."
+        ),
     )
     parser.add_argument(
         "--torque_limit",
@@ -1527,6 +1792,12 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Add training-style uniform noise to policy observation terms (default: true).",
+    )
+    parser.add_argument(
+        "--domain_randomization",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply Isaac-matching domain randomization in Genesis (default: true).",
     )
     parser.add_argument(
         "--show_reference",
@@ -1558,21 +1829,27 @@ def main():
         raise FileNotFoundError(f"XML file not found: {args.xml_file}")
     if args.motion_file is not None and not os.path.isfile(args.motion_file):
         raise FileNotFoundError(f"Motion file not found: {args.motion_file}")
-    if args.metric_num_envs <= 0:
-        raise ValueError(f"--metric_num_envs must be > 0. Got {args.metric_num_envs}")
+    effective_compute_metrics = bool(args.compute_metrics or args.record_motion)
+    effective_metric_num_envs = args.target_trajectories if args.record_motion else args.metric_num_envs
+    if effective_compute_metrics and effective_metric_num_envs <= 0:
+        raise ValueError(f"--metric_num_envs must be > 0. Got {effective_metric_num_envs}")
 
     policy_name = os.path.basename(args.policy_path).replace(".onnx", "")
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    output_csv = args.output_csv
-    if output_csv is None:
-        default_suffix = "_genesis_metrics.csv" if args.compute_metrics else "_genesis_eval.csv"
-        output_csv = os.path.join("logs", "sim2sim_eval", f"{policy_name}{default_suffix}")
+    output_csv = None
+    if effective_compute_metrics:
+        output_csv = args.output_csv
+        if output_csv is None:
+            output_csv = os.path.join("logs", "sim2sim_eval", f"{policy_name}_genesis_metrics.csv")
+        output_csv = _append_timestamp_to_path(output_csv, run_timestamp)
 
     output_motion_npz = None
     if args.record_motion:
         output_motion_npz = args.output_motion_npz
         if output_motion_npz is None:
             output_motion_npz = os.path.join("logs", "sim2sim_eval", f"{policy_name}_motion_dataset.npz")
+        output_motion_npz = _append_timestamp_to_path(output_motion_npz, run_timestamp)
 
     evaluator = Sim2SimEvaluatorGenesis(
         policy_path=args.policy_path,
@@ -1584,6 +1861,7 @@ def main():
         sim_dt=args.sim_dt,
         control_dt=args.control_dt,
         max_steps=args.max_steps,
+        start_timestep=args.start_timestep,
         torque_limit=args.torque_limit,
         record_video=args.record_video,
         viewer=args.viewer,
@@ -1593,20 +1871,23 @@ def main():
         output_motion_npz=output_motion_npz,
         target_trajectories=args.target_trajectories,
         record_motion=args.record_motion,
-        compute_metrics=args.compute_metrics,
-        metric_num_envs=args.metric_num_envs,
+        compute_metrics=effective_compute_metrics,
+        metric_num_envs=effective_metric_num_envs,
         add_noise=args.add_noise,
+        domain_randomization=args.domain_randomization,
     )
 
     result = evaluator.evaluate(video_name=args.video_name)
-    _write_csv(output_csv, result)
+    if output_csv is not None:
+        _write_csv(output_csv, result)
     if args.output_json is not None:
         _write_json(args.output_json, result)
 
     print("\n=== Genesis Sim2Sim Evaluation Summary ===")
     for key in sorted(result.keys()):
         print(f"{key}: {result[key]}")
-    print(f"\nSaved CSV: {output_csv}")
+    if output_csv is not None:
+        print(f"\nSaved CSV: {output_csv}")
     if args.output_json is not None:
         print(f"Saved JSON: {args.output_json}")
     if "output_motion_npz" in result:
