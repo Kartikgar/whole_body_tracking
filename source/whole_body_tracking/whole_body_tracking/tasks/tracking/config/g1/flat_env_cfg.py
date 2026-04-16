@@ -110,6 +110,8 @@ class G1FlatEnvCfg(TrackingEnvCfg):
         self.scene.robot = G1_CYLINDER_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.actions.joint_pos.scale = G1_ACTION_SCALE
         self.commands.motion.debug_vis_goal_relative_to_robot = False
+        self.commands.motion.debug_vis_show_current = False
+        self.commands.motion.debug_vis_show_goal = True
         self.commands.motion.anchor_body_name = "torso_link"
         # self.commands.motion.body_names = [
         #     "pelvis",
@@ -240,6 +242,7 @@ class G1FlatDeltaAFineTuneEnvCfg(G1FlatEnvCfg):
         self.rewards.motion_body_ori_global = None
         self.episode_length_s = 10.0
         self.terminations.ee_body_pos = None
+        self.terminations.anchor_pos = None
 
 
 @configclass

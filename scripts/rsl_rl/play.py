@@ -69,6 +69,12 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--delta_com_force_debug_vis",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Enable viewport arrow visualization for applied COM forces in `--delta_action_space com_force` mode.",
+)
+parser.add_argument(
     "--replay_motion_actions_only",
     action="store_true",
     default=False,
@@ -82,6 +88,42 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Enable adaptive reference time-step sampling (disabled by default in play).",
+)
+parser.add_argument(
+    "--record_delta_model_dataset",
+    action="store_true",
+    default=False,
+    help=(
+        "Record delta-model inference trajectories (obs/actions) to NPZ using Genesis-style padded "
+        "[num_traj, T, D] payload."
+    ),
+)
+parser.add_argument(
+    "--output_delta_model_npz",
+    type=str,
+    default=None,
+    help=(
+        "Output NPZ path for --record_delta_model_dataset. "
+        "If omitted, defaults to <checkpoint_name>_<timestamp>.npz under the run directory."
+    ),
+)
+parser.add_argument(
+    "--delta_dataset_target_trajectories",
+    "--target_trajectories",
+    dest="delta_dataset_target_trajectories",
+    type=int,
+    default=0,
+    help=(
+        "Number of completed trajectories to record for --record_delta_model_dataset. "
+        "Set <= 0 to keep recording until play loop exits. "
+        "Alias: --target_trajectories."
+    ),
+)
+parser.add_argument(
+    "--delta_dataset_include_partial",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Include in-progress (non-terminated) trajectories when saving --record_delta_model_dataset.",
 )
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -104,6 +146,9 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 import os
 import pathlib
+from datetime import datetime
+
+import numpy as np
 import torch
 
 from isaaclab.envs import (
@@ -181,6 +226,7 @@ def _configure_delta_action_space(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg
                 com_force_cfg.offset = joint_pos_cfg.offset
             if hasattr(joint_pos_cfg, "clip"):
                 com_force_cfg.clip = joint_pos_cfg.clip
+            com_force_cfg.debug_vis = bool(args_cli.delta_com_force_debug_vis)
             env_cfg.actions.joint_pos = com_force_cfg
             # COM-force mode: disable action penalties.
             if hasattr(env_cfg, "rewards"):
@@ -191,7 +237,8 @@ def _configure_delta_action_space(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg
             print(
                 "[INFO]: Using COM-force delta action space with 3D force actions "
                 f"(Fx, Fy, Fz), scale={args_cli.delta_com_force_scale} N, "
-                f"clip={force_clip}, body='{force_body_name}'."
+                f"clip={force_clip}, body='{force_body_name}', "
+                f"debug_vis={com_force_cfg.debug_vis}."
             )
             print("[INFO]: Disabled action-penalty rewards for COM-force mode.")
         else:
@@ -301,6 +348,285 @@ def _has_motion_command(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectM
         and hasattr(env_cfg.commands, "motion")
         and getattr(env_cfg.commands, "motion", None) is not None
     )
+
+
+def _append_timestamp_to_path(path: str, timestamp: str) -> str:
+    directory = os.path.dirname(path)
+    filename = os.path.basename(path)
+    stem, ext = os.path.splitext(filename)
+    stamped = f"{stem}_{timestamp}{ext}"
+    return os.path.join(directory, stamped)
+
+
+def _resolve_control_dt(env: RslRlVecEnvWrapper) -> float:
+    step_dt = getattr(env.unwrapped, "step_dt", None)
+    if step_dt is not None:
+        step_dt = float(step_dt)
+        if step_dt > 0.0:
+            return step_dt
+
+    cfg = getattr(env.unwrapped, "cfg", None)
+    sim_cfg = getattr(cfg, "sim", None)
+    sim_dt = getattr(sim_cfg, "dt", None)
+    decimation = getattr(cfg, "decimation", None)
+    if sim_dt is not None and decimation is not None:
+        control_dt = float(sim_dt) * float(decimation)
+        if control_dt > 0.0:
+            return control_dt
+    return 0.0
+
+
+def _group_history_lengths(observation_manager, group_name: str, term_names: list[str]) -> list[int]:
+    group_cfg = getattr(observation_manager.cfg, group_name)
+    group_history_length = getattr(group_cfg, "history_length", None)
+    if group_history_length is not None:
+        hist = int(group_history_length)
+        hist = 1 if hist == 0 else hist
+        return [hist] * len(term_names)
+
+    history_lengths: list[int] = []
+    for term_name in term_names:
+        term_cfg = getattr(group_cfg, term_name, None)
+        term_history = int(getattr(term_cfg, "history_length", 0)) if term_cfg is not None else 0
+        history_lengths.append(1 if term_history == 0 else term_history)
+    return history_lengths
+
+
+def _infer_group_obs_split_spec(env, group_name: str) -> tuple[list[str], list[int], list[str]]:
+    observation_manager = env.observation_manager
+    term_names = list(observation_manager.active_terms[group_name])
+    history_lengths = _group_history_lengths(observation_manager, group_name, term_names)
+    group_cfg = getattr(observation_manager.cfg, group_name)
+
+    split_dims: list[int] = []
+    payload_keys: list[str] = []
+    for term_name, hist_len in zip(term_names, history_lengths, strict=True):
+        term_cfg = getattr(group_cfg, term_name, None)
+        if term_cfg is None or getattr(term_cfg, "func", None) is None:
+            raise RuntimeError(
+                f"Could not resolve observation term config for group='{group_name}', term='{term_name}'."
+            )
+        params = getattr(term_cfg, "params", None) or {}
+        term_tensor = term_cfg.func(env, **params)
+        if isinstance(term_tensor, dict):
+            term_tensor = torch.cat([term_tensor[key] for key in term_tensor], dim=-1)
+        if term_tensor.ndim < 2:
+            term_tensor = term_tensor.reshape(term_tensor.shape[0], -1)
+        base_dim = int(term_tensor.reshape(term_tensor.shape[0], -1).shape[1])
+        split_dims.append(base_dim * int(hist_len))
+        # Prefix with `obs_` to avoid collision with action keys (`action`, `actions`).
+        payload_keys.append(f"obs_{term_name}")
+    return term_names, split_dims, payload_keys
+
+
+def _split_obs_into_term_components(
+    obs_batch: torch.Tensor,
+    split_dims: list[int],
+    payload_keys: list[str],
+) -> dict[str, torch.Tensor]:
+    obs_2d = obs_batch
+    if obs_2d.ndim == 1:
+        obs_2d = obs_2d.reshape(1, -1)
+    if obs_2d.ndim != 2:
+        raise AssertionError(f"Expected observation tensor shape [B, D], got {tuple(obs_2d.shape)}.")
+
+    total_dim = int(sum(split_dims))
+    if int(obs_2d.shape[1]) != total_dim:
+        raise AssertionError(
+            f"Observation dim mismatch while splitting components: obs_dim={int(obs_2d.shape[1])}, expected={total_dim}."
+        )
+
+    components: dict[str, torch.Tensor] = {}
+    start = 0
+    for key, dim in zip(payload_keys, split_dims, strict=True):
+        end = start + int(dim)
+        components[key] = obs_2d[:, start:end]
+        start = end
+    return components
+
+
+class _DeltaModelTrajectoryRecorder:
+    def __init__(self, num_envs: int, fps: float, target_trajectories: int):
+        self.num_envs = int(num_envs)
+        self.fps = float(fps)
+        self.target_trajectories = max(int(target_trajectories), 0)
+        self.obs_component_keys: list[str] = []
+        self.action_key = "actions"
+        self.traj_buffers: list[dict[str, list[np.ndarray]]] = [{self.action_key: []} for _ in range(self.num_envs)]
+        self.collected_trajectories: list[dict[str, np.ndarray]] = []
+        self.saved_count = 0
+        self.saved_motion_length = 0
+
+    @property
+    def collected_count(self) -> int:
+        return len(self.collected_trajectories)
+
+    def has_reached_target(self) -> bool:
+        return self.target_trajectories > 0 and self.collected_count >= self.target_trajectories
+
+    def _ensure_obs_component_keys(self, obs_components: dict[str, torch.Tensor]):
+        keys = list(obs_components.keys())
+        if len(keys) == 0:
+            raise AssertionError("Observation component dictionary is empty.")
+        if len(self.obs_component_keys) == 0:
+            self.obs_component_keys = keys
+            for env_id in range(self.num_envs):
+                for key in self.obs_component_keys:
+                    self.traj_buffers[env_id][key] = []
+            return
+        if keys != self.obs_component_keys:
+            raise AssertionError(
+                "Observation component keys changed during rollout: "
+                f"expected {self.obs_component_keys}, got {keys}."
+            )
+
+    def append_step(self, obs_components: dict[str, torch.Tensor], action_batch: torch.Tensor):
+        self._ensure_obs_component_keys(obs_components)
+        action_np = action_batch.detach().to("cpu", dtype=torch.float32).numpy()
+        if action_np.ndim != 2 or action_np.shape[0] != self.num_envs:
+            raise AssertionError(f"Expected action shape [num_envs, A], got {action_np.shape}.")
+
+        obs_np_map: dict[str, np.ndarray] = {}
+        for key in self.obs_component_keys:
+            obs_np = obs_components[key].detach().to("cpu", dtype=torch.float32).numpy()
+            if obs_np.ndim != 2 or obs_np.shape[0] != self.num_envs:
+                raise AssertionError(f"Expected observation component '{key}' shape [num_envs, D], got {obs_np.shape}.")
+            obs_np_map[key] = obs_np
+
+        for env_id in range(self.num_envs):
+            for key in self.obs_component_keys:
+                self.traj_buffers[env_id][key].append(obs_np_map[key][env_id].astype(np.float32).copy())
+            self.traj_buffers[env_id][self.action_key].append(action_np[env_id].astype(np.float32).copy())
+
+    def finalize_done(self, dones: torch.Tensor) -> int:
+        done_mask = dones.detach().to(device="cpu", dtype=torch.bool)
+        if done_mask.ndim == 0:
+            done_mask = done_mask.reshape(1)
+        elif done_mask.ndim > 1:
+            done_mask = done_mask.reshape(done_mask.shape[0], -1).any(dim=1)
+        if done_mask.ndim != 1 or done_mask.shape[0] != self.num_envs:
+            raise AssertionError(f"Expected done mask shape [num_envs], got {tuple(done_mask.shape)}.")
+
+        gained = 0
+        done_ids = torch.nonzero(done_mask, as_tuple=False).flatten().tolist()
+        for env_id in done_ids:
+            if self.has_reached_target():
+                break
+            gained += self._finalize_env_traj(env_id)
+        return gained
+
+    def finalize_open(self):
+        for env_id in range(self.num_envs):
+            if self.has_reached_target():
+                break
+            self._finalize_env_traj(env_id)
+
+    def _finalize_env_traj(self, env_id: int) -> int:
+        if self.has_reached_target():
+            return 0
+        if len(self.traj_buffers[env_id][self.action_key]) == 0:
+            return 0
+        keys = [*self.obs_component_keys, self.action_key]
+        traj = {key: np.stack(self.traj_buffers[env_id][key], axis=0).astype(np.float32) for key in keys}
+        self.collected_trajectories.append(traj)
+        self.traj_buffers[env_id] = {key: [] for key in keys}
+        return 1
+
+    def save_dataset(self, output_path: str, include_partial: bool) -> str | None:
+        if include_partial:
+            self.finalize_open()
+
+        if len(self.collected_trajectories) == 0:
+            self.saved_count = 0
+            self.saved_motion_length = 0
+            return None
+
+        trajs = (
+            self.collected_trajectories
+            if self.target_trajectories <= 0
+            else self.collected_trajectories[: self.target_trajectories]
+        )
+        motion_length = max(int(traj[self.action_key].shape[0]) for traj in trajs)
+        action_dim = int(trajs[0][self.action_key].reshape(trajs[0][self.action_key].shape[0], -1).shape[1])
+        obs_dims = {
+            key: int(trajs[0][key].reshape(trajs[0][key].shape[0], -1).shape[1]) for key in self.obs_component_keys
+        }
+
+        payload: dict[str, np.ndarray] = {
+            "fps": np.array([self.fps], dtype=np.float32),
+        }
+
+        for key, expected_dim in [*(list(obs_dims.items())), (self.action_key, action_dim)]:
+            stacked: list[np.ndarray] = []
+            for traj in trajs:
+                seq = traj[key].astype(np.float32).reshape(traj[key].shape[0], -1)
+                if seq.shape[1] != expected_dim:
+                    raise AssertionError(
+                        f"Trajectory key '{key}' dim mismatch: expected {expected_dim}, got {seq.shape[1]}."
+                    )
+                if seq.shape[0] <= 0:
+                    raise AssertionError(f"Trajectory key '{key}' has empty time dimension.")
+                if seq.shape[0] < motion_length:
+                    pad = np.repeat(seq[-1:, ...], motion_length - seq.shape[0], axis=0)
+                    seq = np.concatenate([seq, pad], axis=0)
+                elif seq.shape[0] > motion_length:
+                    seq = seq[:motion_length]
+                stacked.append(seq)
+            payload[key] = np.stack(stacked, axis=0).astype(np.float32)
+
+        expected_num_traj = len(trajs)
+        expected_shapes = {
+            key: (expected_num_traj, motion_length, dim) for key, dim in obs_dims.items()
+        }
+        expected_shapes.update(
+            {
+                self.action_key: (expected_num_traj, motion_length, action_dim),
+            }
+        )
+        fps = payload["fps"]
+        if fps.ndim != 1 or fps.shape[0] != 1 or not np.isfinite(fps).all() or float(fps[0]) <= 0.0:
+            raise AssertionError(f"Invalid `fps` payload shape/value: shape={fps.shape}, value={fps}")
+        for key, value in payload.items():
+            if key == "fps":
+                continue
+            if value.shape != expected_shapes[key]:
+                raise AssertionError(
+                    f"Payload key '{key}' shape mismatch: expected {expected_shapes[key]}, got {value.shape}"
+                )
+
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        np.savez(output_path, **payload)
+        self.saved_count = expected_num_traj
+        self.saved_motion_length = motion_length
+        return output_path
+
+
+def _resolve_obs_components_for_logging(
+    env,
+    group_name: str,
+    obs_batch: torch.Tensor,
+    split_cache: dict[str, tuple[list[str], list[int], list[str]]],
+) -> dict[str, torch.Tensor]:
+    if group_name not in split_cache:
+        split_cache[group_name] = _infer_group_obs_split_spec(env, group_name)
+    _, split_dims, payload_keys = split_cache[group_name]
+    return _split_obs_into_term_components(obs_batch=obs_batch, split_dims=split_dims, payload_keys=payload_keys)
+
+
+def _get_motion_time_steps(env) -> torch.Tensor | None:
+    command_manager = getattr(env, "command_manager", None)
+    if command_manager is None:
+        return None
+    try:
+        motion_term = command_manager.get_term("motion")
+    except Exception:
+        return None
+    time_steps = getattr(motion_term, "time_steps", None)
+    if time_steps is None:
+        return None
+    if not isinstance(time_steps, torch.Tensor):
+        return None
+    return time_steps.detach().clone()
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
@@ -423,6 +749,45 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.replay_motion_actions_only:
         print("[INFO]: Replaying motion actions only (policy actions are forced to zero each step).")
 
+    delta_dataset_recorder = None
+    delta_dataset_output_path = None
+    if args_cli.record_delta_model_dataset:
+        control_dt = _resolve_control_dt(env)
+        if control_dt <= 0.0:
+            print("[WARN]: Could not resolve control dt; using fallback fps=1.0 for delta-model dataset logging.")
+            control_dt = 1.0
+        delta_fps = 1.0 / control_dt
+        delta_dataset_recorder = _DeltaModelTrajectoryRecorder(
+            num_envs=env.num_envs,
+            fps=delta_fps,
+            target_trajectories=args_cli.delta_dataset_target_trajectories,
+        )
+        checkpoint_stem = os.path.splitext(os.path.basename(resume_path))[0]
+        default_delta_npz = os.path.join(
+            os.path.dirname(resume_path),
+            "delta_model_datasets",
+            f"{checkpoint_stem if checkpoint_stem else 'policy'}.npz",
+        )
+        requested_output = args_cli.output_delta_model_npz or default_delta_npz
+        requested_output = os.path.abspath(os.path.expanduser(requested_output))
+        run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        delta_dataset_output_path = _append_timestamp_to_path(requested_output, run_timestamp)
+
+        if ppo_runner.delta_policy is None:
+            print(
+                "[INFO]: Delta-model dataset logging enabled without frozen delta policy; "
+                "recording active policy obs/actions."
+            )
+        else:
+            print("[INFO]: Delta-model dataset logging enabled; recording frozen delta-policy obs/actions only.")
+        if delta_dataset_recorder.target_trajectories > 0:
+            print(
+                f"[INFO]: Collecting {delta_dataset_recorder.target_trajectories} completed trajectories into "
+                f"{delta_dataset_output_path}"
+            )
+        else:
+            print(f"[INFO]: Collecting trajectories until exit into {delta_dataset_output_path}")
+
     # Export ONNX only for motion-command tasks, since exporter metadata expects `commands.motion`.
     if _has_motion_command(env_cfg):
         export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
@@ -445,17 +810,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO]: Exported ONNX policy to: {os.path.join(export_model_dir, onnx_filename)}")
     else:
         print("[INFO]: Skipping ONNX export for tasks without a motion command.")
+    obs_split_cache: dict[str, tuple[list[str], list[int], list[str]]] = {}
+    shutdown_requested_by_target = False
+
     # reset environment
     obs, _ = env.get_observations()
+    prev_motion_time_steps = _get_motion_time_steps(env.unwrapped)
     timestep = 0
     # simulate environment
     while simulation_app.is_running():
         # run everything in inference mode
         with torch.inference_mode():
             # agent stepping
-            actions = policy(obs)
+            policy_actions = policy(obs)
+            actions = policy_actions
             if args_cli.replay_motion_actions_only:
-                actions.zero_()
+                actions = torch.zeros_like(policy_actions)
+
+            delta_log_obs = obs
+            delta_log_obs_group = "policy"
+            delta_log_actions = policy_actions
             if ppo_runner.delta_policy is not None:
                 # Inject same-step base-policy action for delta-policy current_action input.
                 ppo_runner._set_delta_base_action_buffer(actions)
@@ -464,23 +838,85 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 delta_actions = ppo_runner._compute_delta_actions(delta_obs)
                 if delta_actions is not None:
                     ppo_runner._set_delta_action_buffer(delta_actions)
+                    delta_log_obs = delta_obs
+                    delta_log_obs_group = ppo_runner.delta_policy_obs_group
+                    delta_log_actions = delta_actions
+
+            if delta_dataset_recorder is not None:
+                obs_components = _resolve_obs_components_for_logging(
+                    env=env.unwrapped,
+                    group_name=delta_log_obs_group,
+                    obs_batch=delta_log_obs,
+                    split_cache=obs_split_cache,
+                )
+                delta_dataset_recorder.append_step(obs_components, delta_log_actions)
             # env stepping
             # actions.zero_()
             # print(actions)
             # import ipdb;ipdb.set_trace()
 
-            obs, _, _, infos = env.step(actions)
+            obs, _, dones, _ = env.step(actions)
+
+            if delta_dataset_recorder is not None:
+                done_source = dones
+                termination_manager = getattr(env.unwrapped, "termination_manager", None)
+                if termination_manager is not None and hasattr(termination_manager, "terminated"):
+                    term_done = termination_manager.terminated
+                    try:
+                        done_source = torch.logical_or(done_source.to(dtype=torch.bool), term_done.to(dtype=torch.bool))
+                    except Exception:
+                        done_source = dones
+
+                # Also treat reference-motion rollover as trajectory completion.
+                current_motion_time_steps = _get_motion_time_steps(env.unwrapped)
+                if prev_motion_time_steps is not None and current_motion_time_steps is not None:
+                    try:
+                        motion_rollover_done = current_motion_time_steps < prev_motion_time_steps
+                        done_source = torch.logical_or(done_source.to(dtype=torch.bool), motion_rollover_done.to(dtype=torch.bool))
+                    except Exception:
+                        pass
+                prev_motion_time_steps = current_motion_time_steps
+
+                gained = delta_dataset_recorder.finalize_done(done_source)
+                if gained > 0 and delta_dataset_recorder.target_trajectories > 0:
+                    shown = min(delta_dataset_recorder.collected_count, delta_dataset_recorder.target_trajectories)
+                    print(
+                        f"[INFO]: Collected delta trajectories: {shown}/"
+                        f"{delta_dataset_recorder.target_trajectories}"
+                    )
+                if delta_dataset_recorder.has_reached_target():
+                    print("[INFO]: Reached requested delta trajectory count. Stopping play loop.")
+                    shutdown_requested_by_target = True
+                    break
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
 
+    if delta_dataset_recorder is not None and delta_dataset_output_path is not None:
+        saved_path = delta_dataset_recorder.save_dataset(
+            output_path=delta_dataset_output_path,
+            include_partial=bool(args_cli.delta_dataset_include_partial),
+        )
+        if saved_path is None:
+            print("[WARN]: Delta-model dataset logging was enabled but no samples were collected.")
+        else:
+            print(
+                f"[INFO]: Saved delta-model dataset to {saved_path} "
+                f"(trajectories={delta_dataset_recorder.saved_count}, "
+                f"motion_length={delta_dataset_recorder.saved_motion_length})."
+            )
+
     # Clean up any externally injected action buffers.
     ppo_runner._clear_delta_action_buffer()
 
     # close the simulator
     env.close()
+
+    if shutdown_requested_by_target:
+        print("[INFO]: Target trajectory count met. Shutting down simulator app.")
+        simulation_app.close()
 
 
 if __name__ == "__main__":

@@ -3,11 +3,14 @@ from __future__ import annotations
 import torch
 from collections.abc import Sequence
 
+import isaaclab.sim as sim_utils
 from isaaclab.envs.mdp.actions.actions_cfg import JointPositionActionCfg
 from isaaclab.envs.mdp.actions.joint_actions import JointPositionAction
 from isaaclab.managers.action_manager import ActionTerm
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 import isaaclab.utils.string as string_utils
 from isaaclab.utils import configclass
+from isaaclab.utils.math import quat_from_angle_axis, quat_rotate
 
 
 class DeltaJointPositionAction(JointPositionAction):
@@ -86,6 +89,10 @@ class DeltaComForceAction(ActionTerm):
     cfg: DeltaComForceActionCfg
 
     def __init__(self, cfg: DeltaComForceActionCfg, env):
+        # Pre-init debug-vis fields because ActionTerm.__init__ may call _set_debug_vis_impl().
+        self._force_visualizer: VisualizationMarkers | None = None
+        self._force_arrow_x_axis = torch.tensor([[1.0, 0.0, 0.0]], device=env.device, dtype=torch.float32)
+        self._force_arrow_fallback_axis = torch.tensor([[0.0, 1.0, 0.0]], device=env.device, dtype=torch.float32)
         super().__init__(cfg, env)
         self._motion_command = env.command_manager.get_term(cfg.motion_command_name)
 
@@ -106,6 +113,7 @@ class DeltaComForceAction(ActionTerm):
                 f"`force_body_name` must resolve to exactly one body. Got {self._force_body_names} "
                 f"for pattern '{self.cfg.force_body_name}'."
             )
+        self._force_body_id = int(self._force_body_ids[0])
 
         # Action-space buffers (policy output = Fx, Fy, Fz).
         self._raw_actions = torch.zeros(self.num_envs, 3, device=self.device)
@@ -161,6 +169,10 @@ class DeltaComForceAction(ActionTerm):
                 self._joint_clip[:, index_list] = torch.tensor(value_list, device=self.device)
             else:
                 raise ValueError(f"Unsupported clip type: {type(cfg.clip)}. Supported types are dict.")
+
+        # Debug-vis helpers for rendering COM-force arrows.
+        self._force_arrow_x_axis = self._force_arrow_x_axis.to(device=self.device)
+        self._force_arrow_fallback_axis = self._force_arrow_fallback_axis.to(device=self.device)
 
     @property
     def action_dim(self) -> int:
@@ -248,6 +260,84 @@ class DeltaComForceAction(ActionTerm):
             torques=self._external_torques,
             body_ids=self._force_body_ids,
         )
+
+    def _set_debug_vis_impl(self, debug_vis: bool):
+        force_visualizer = getattr(self, "_force_visualizer", None)
+        if debug_vis:
+            if force_visualizer is None:
+                force_marker_cfg = VisualizationMarkersCfg(
+                    prim_path="/Visuals/Actions/com_force",
+                    markers={
+                        "force": sim_utils.ConeCfg(
+                            radius=0.5,
+                            height=1.0,
+                            axis="X",
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 1.0, 0.0)),
+                        )
+                    },
+                )
+                self._force_visualizer = VisualizationMarkers(force_marker_cfg)
+                force_visualizer = self._force_visualizer
+            force_visualizer.set_visibility(True)
+        elif force_visualizer is not None:
+            force_visualizer.set_visibility(False)
+
+    def _compute_force_arrow_orientation(self, force_w: torch.Tensor) -> torch.Tensor:
+        num_envs = force_w.shape[0]
+        x_axis = self._force_arrow_x_axis.expand(num_envs, -1)
+        force_norm = torch.linalg.norm(force_w, dim=-1, keepdim=True)
+
+        direction = torch.where(force_norm > self.cfg.force_debug_vis_min_magnitude, force_w / force_norm, x_axis)
+        direction = direction / direction.norm(dim=-1, keepdim=True).clamp_min(1.0e-9)
+        dot = torch.clamp(torch.sum(x_axis * direction, dim=-1), -1.0, 1.0)
+
+        cross = torch.cross(x_axis, direction, dim=-1)
+        cross_norm = torch.linalg.norm(cross, dim=-1, keepdim=True)
+        axis = cross / cross_norm.clamp_min(1.0e-9)
+        angle = torch.acos(dot)
+        orientations = quat_from_angle_axis(angle, axis)
+
+        near_parallel = cross_norm.squeeze(-1) < 1.0e-6
+        if torch.any(near_parallel):
+            orientations[near_parallel] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
+            anti_parallel = near_parallel & (dot < 0.0)
+            if torch.any(anti_parallel):
+                anti_angle = torch.full((int(anti_parallel.sum()),), torch.pi, device=self.device)
+                anti_axis = self._force_arrow_fallback_axis.expand(int(anti_parallel.sum()), -1)
+                orientations[anti_parallel] = quat_from_angle_axis(anti_angle, anti_axis)
+        return orientations
+
+    def _debug_vis_callback(self, event):
+        del event
+        if self._force_visualizer is None or not self._asset.is_initialized:
+            return
+
+        body_pos_w = self._asset.data.body_pos_w[:, self._force_body_id]
+        body_quat_w = self._asset.data.body_quat_w[:, self._force_body_id]
+
+        # Draw only one net-force arrow in world frame.
+        force_w = quat_rotate(body_quat_w, self._processed_actions)
+        orientations = self._compute_force_arrow_orientation(force_w)
+
+        force_mag = torch.linalg.norm(self._processed_actions, dim=-1)
+        arrow_len = force_mag * self.cfg.force_debug_vis_length_scale
+        is_nonzero = force_mag > self.cfg.force_debug_vis_min_magnitude
+        arrow_len = torch.where(
+            is_nonzero,
+            arrow_len,
+            torch.full_like(arrow_len, self.cfg.force_debug_vis_hidden_arrow_length),
+        )
+        arrow_thickness = torch.full_like(arrow_len, self.cfg.force_debug_vis_thickness)
+        scales = torch.stack((arrow_len, arrow_thickness, arrow_thickness), dim=-1)
+
+        # Shift marker center so cone base stays at COM (instead of centering cone on COM).
+        force_dir_w = torch.where(
+            force_mag.unsqueeze(-1) > self.cfg.force_debug_vis_min_magnitude,
+            force_w / force_mag.unsqueeze(-1).clamp_min(1.0e-9),
+            torch.zeros_like(force_w),
+        )
+        marker_pos_w = body_pos_w + 0.5 * arrow_len.unsqueeze(-1) * force_dir_w
+        self._force_visualizer.visualize(translations=marker_pos_w, orientations=orientations, scales=scales)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         self._raw_actions[env_ids] = 0.0
@@ -353,8 +443,14 @@ class DeltaComForceActionCfg(JointPositionActionCfg):
     motion_command_name: str = "motion"
     require_motion_action: bool = True
     force_body_name: str = "torso_link"
-    force_scale: float | tuple[float, float, float] = 1.0
+    force_scale: float | tuple[float, float, float] = 0.1
     force_clip: float | tuple[float, float] | None = None
+    force_debug_vis_length_scale: float = 0.02
+    force_debug_vis_thickness: float = 0.1
+    force_debug_vis_min_magnitude: float = 1.0e-4
+    force_debug_vis_min_arrow_length: float = 0.05
+    force_debug_vis_max_arrow_length: float = 5.0
+    force_debug_vis_hidden_arrow_length: float = 1.0e-4
 
 
 @configclass

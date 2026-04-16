@@ -603,6 +603,14 @@ class MotionCommand(CommandTerm):
         self.metrics["error_joint_vel"] = torch.norm(self.joint_vel - self.robot_joint_vel, dim=-1)
 
     def _adaptive_sampling(self, env_ids: Sequence[int]):
+        if not self.cfg.sample_time_steps:
+            # Deterministic replay mode: always restart selected trajectories from the first frame.
+            self.time_steps[env_ids] = 0
+            self.metrics["sampling_entropy"][:] = 0.0
+            self.metrics["sampling_top1_prob"][:] = 1.0
+            self.metrics["sampling_top1_bin"][:] = 0.0
+            return
+
         episode_failed = self._env.termination_manager.terminated[env_ids]
         if torch.any(episode_failed):
             env_lengths = torch.clamp(self.motion.trajectory_time_step_total[self.trajectory_ids], min=1)
@@ -747,11 +755,11 @@ class MotionCommand(CommandTerm):
                         )
                     )
 
-            self.current_anchor_visualizer.set_visibility(True)
-            self.goal_anchor_visualizer.set_visibility(True)
+            self.current_anchor_visualizer.set_visibility(self.cfg.debug_vis_show_current)
+            self.goal_anchor_visualizer.set_visibility(self.cfg.debug_vis_show_goal)
             for i in range(len(self.cfg.body_names)):
-                self.current_body_visualizers[i].set_visibility(True)
-                self.goal_body_visualizers[i].set_visibility(True)
+                self.current_body_visualizers[i].set_visibility(self.cfg.debug_vis_show_current)
+                self.goal_body_visualizers[i].set_visibility(self.cfg.debug_vis_show_goal)
 
         else:
             if hasattr(self, "current_anchor_visualizer"):
@@ -765,8 +773,10 @@ class MotionCommand(CommandTerm):
         if not self.robot.is_initialized:
             return
 
-        self.current_anchor_visualizer.visualize(self.robot_anchor_pos_w, self.robot_anchor_quat_w)
-        self.goal_anchor_visualizer.visualize(self.anchor_pos_w, self.anchor_quat_w)
+        if self.cfg.debug_vis_show_current:
+            self.current_anchor_visualizer.visualize(self.robot_anchor_pos_w, self.robot_anchor_quat_w)
+        if self.cfg.debug_vis_show_goal:
+            self.goal_anchor_visualizer.visualize(self.anchor_pos_w, self.anchor_quat_w)
 
         if self.cfg.debug_vis_goal_relative_to_robot:
             goal_body_pos = self.body_pos_relative_w
@@ -776,8 +786,10 @@ class MotionCommand(CommandTerm):
             goal_body_quat = self.body_quat_w
 
         for i in range(len(self.cfg.body_names)):
-            self.current_body_visualizers[i].visualize(self.robot_body_pos_w[:, i], self.robot_body_quat_w[:, i])
-            self.goal_body_visualizers[i].visualize(goal_body_pos[:, i], goal_body_quat[:, i])
+            if self.cfg.debug_vis_show_current:
+                self.current_body_visualizers[i].visualize(self.robot_body_pos_w[:, i], self.robot_body_quat_w[:, i])
+            if self.cfg.debug_vis_show_goal:
+                self.goal_body_visualizers[i].visualize(goal_body_pos[:, i], goal_body_quat[:, i])
 
 
 @configclass
@@ -802,6 +814,10 @@ class MotionCommandCfg(CommandTermCfg):
     adaptive_uniform_ratio: float = 0.1
     adaptive_alpha: float = 0.001
 
+    # If True, sample random reference time-steps on command resample.
+    # If False, restart at time-step 0 for deterministic start-to-finish replay.
+    sample_time_steps: bool = True
+
     # Multi-trajectory sampling controls.
     sample_trajectories: bool = False
     equal_trajectory_sampling: bool = False
@@ -809,6 +825,10 @@ class MotionCommandCfg(CommandTermCfg):
     # If True, goal/reference body markers are yaw-aligned to the robot anchor for easier shape comparison.
     # If False, goal/reference body markers stay in world frame and don't rotate with robot turns/falls.
     debug_vis_goal_relative_to_robot: bool = True
+    # If True, show robot-current debug markers.
+    debug_vis_show_current: bool = True
+    # If True, show reference/goal debug markers.
+    debug_vis_show_goal: bool = True
 
     anchor_visualizer_cfg: VisualizationMarkersCfg = FRAME_MARKER_CFG.replace(prim_path="/Visuals/Command/pose")
     anchor_visualizer_cfg.markers["frame"].scale = (0.2, 0.2, 0.2)
