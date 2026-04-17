@@ -20,6 +20,18 @@ parser.add_argument(
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--motion_file", type=str, default=None, help="Path to the motion file.")
+parser.add_argument(
+    "--low_level_policy_1_motion_file",
+    type=str,
+    default=None,
+    help="Optional local path to motion .npz for low-level policy #1 in hierarchical switch tasks.",
+)
+parser.add_argument(
+    "--low_level_policy_2_motion_file",
+    type=str,
+    default=None,
+    help="Optional local path to motion .npz for low-level policy #2 in hierarchical switch tasks.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -60,6 +72,13 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 # Import extensions to set up environment tasks
 import whole_body_tracking.tasks  # noqa: F401
 from whole_body_tracking.utils.exporter import attach_onnx_metadata, export_motion_policy_as_onnx
+
+
+def _resolve_local_motion_file(path: str, arg_name: str) -> str:
+    motion_file = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(motion_file):
+        raise FileNotFoundError(f"{arg_name} not found: {motion_file}")
+    return motion_file
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
@@ -109,6 +128,62 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO] Loading experiment from directory: {log_root_path}")
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+
+    if args_cli.motion_file is not None:
+        resolved_motion_file = _resolve_local_motion_file(args_cli.motion_file, "--motion_file")
+        print(f"[INFO]: Using motion file from CLI: {resolved_motion_file}")
+        env_cfg.commands.motion.motion_file = resolved_motion_file
+
+    motion_policy_1_cfg = getattr(getattr(env_cfg, "commands", None), "motion_policy_1", None)
+    motion_policy_2_cfg = getattr(getattr(env_cfg, "commands", None), "motion_policy_2", None)
+    has_hierarchical_motion_commands = motion_policy_1_cfg is not None and motion_policy_2_cfg is not None
+    if has_hierarchical_motion_commands:
+        using_policy_specific_motion_files = (
+            args_cli.low_level_policy_1_motion_file is not None
+            or args_cli.low_level_policy_2_motion_file is not None
+        )
+
+        if using_policy_specific_motion_files:
+            if args_cli.low_level_policy_1_motion_file is None or args_cli.low_level_policy_2_motion_file is None:
+                raise ValueError(
+                    "Provide both --low_level_policy_1_motion_file and --low_level_policy_2_motion_file for "
+                    "hierarchical switch tasks."
+                )
+            motion_file_policy_1 = _resolve_local_motion_file(
+                args_cli.low_level_policy_1_motion_file,
+                "--low_level_policy_1_motion_file",
+            )
+            motion_file_policy_2 = _resolve_local_motion_file(
+                args_cli.low_level_policy_2_motion_file,
+                "--low_level_policy_2_motion_file",
+            )
+            motion_policy_1_cfg.motion_file = motion_file_policy_1
+            motion_policy_2_cfg.motion_file = motion_file_policy_2
+            if getattr(env_cfg.commands, "motion", None) is not None:
+                env_cfg.commands.motion.motion_file = motion_file_policy_1
+            print(
+                "[INFO]: Using hierarchical per-policy motion files for play: "
+                f"policy_1='{motion_file_policy_1}', policy_2='{motion_file_policy_2}'."
+            )
+        else:
+            shared_motion_cfg = getattr(env_cfg.commands, "motion", None)
+            shared_motion_file = getattr(shared_motion_cfg, "motion_file", None) if shared_motion_cfg is not None else None
+            if not shared_motion_file:
+                raise ValueError(
+                    "Hierarchical switch play requires motion references. Provide --motion_file "
+                    "or both --low_level_policy_1_motion_file and --low_level_policy_2_motion_file."
+                )
+            motion_policy_1_cfg.motion_file = shared_motion_file
+            motion_policy_2_cfg.motion_file = shared_motion_file
+            print(
+                "[INFO]: Using shared motion file for both hierarchical low-level policies in play: "
+                f"{shared_motion_file}"
+            )
+    elif args_cli.low_level_policy_1_motion_file is not None or args_cli.low_level_policy_2_motion_file is not None:
+        print(
+            "[INFO]: Ignoring --low_level_policy_1_motion_file/--low_level_policy_2_motion_file because this "
+            "task does not define hierarchical motion commands."
+        )
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)

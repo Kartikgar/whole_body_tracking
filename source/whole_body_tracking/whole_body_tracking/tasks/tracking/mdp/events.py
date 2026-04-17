@@ -12,6 +12,19 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
 
+def _resolve_action_offset_tensor(action_term):
+    """Resolve an offset tensor from direct or wrapped action terms."""
+    if hasattr(action_term, "_offset"):
+        return action_term._offset
+
+    # Wrapped terms (e.g., hierarchical switch) keep the actual joint action term nested.
+    nested_term = getattr(action_term, "_low_level_action_term", None)
+    if nested_term is not None:
+        return _resolve_action_offset_tensor(nested_term)
+
+    return None
+
+
 def randomize_joint_default_pos(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,
@@ -49,7 +62,10 @@ def randomize_joint_default_pos(
             env_ids = env_ids[:, None]
         asset.data.default_joint_pos[env_ids, joint_ids] = pos
         # update the offset in action since it is not updated automatically
-        env.action_manager.get_term("joint_pos")._offset[env_ids, joint_ids] = pos
+        joint_pos_action_term = env.action_manager.get_term("joint_pos")
+        offset = _resolve_action_offset_tensor(joint_pos_action_term)
+        if offset is not None:
+            offset[env_ids, joint_ids] = pos
 
 
 def randomize_rigid_body_com(

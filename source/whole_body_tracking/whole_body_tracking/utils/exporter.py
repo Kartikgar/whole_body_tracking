@@ -14,6 +14,55 @@ from isaaclab_rl.rsl_rl.exporter import _OnnxPolicyExporter
 from whole_body_tracking.tasks.tracking.mdp import MotionCommand
 
 
+def _resolve_motion_command(env: ManagerBasedRLEnv) -> MotionCommand:
+    """Resolve a motion command term that exists in the current environment."""
+    for command_name in ("motion", "motion_policy_1", "motion_policy_2"):
+        try:
+            return env.command_manager.get_term(command_name)
+        except Exception:
+            continue
+    raise RuntimeError("No motion command term found. Tried: motion, motion_policy_1, motion_policy_2.")
+
+
+def _resolve_action_term_with_scale(action_term):
+    """Resolve nested action terms (e.g. hierarchical wrappers) down to a term with `_scale`."""
+    if hasattr(action_term, "_scale"):
+        return action_term
+
+    nested = getattr(action_term, "_low_level_action_term", None)
+    if nested is not None:
+        return _resolve_action_term_with_scale(nested)
+
+    return action_term
+
+
+def _action_scale_to_list(action_term) -> list[float]:
+    """Convert action scale tensor/scalar from direct or wrapped term into a Python list."""
+    term = _resolve_action_term_with_scale(action_term)
+
+    if hasattr(term, "_scale"):
+        scale = term._scale
+        if isinstance(scale, torch.Tensor):
+            if scale.ndim == 0:
+                return [float(scale.detach().cpu().item())]
+            if scale.ndim >= 2:
+                return scale[0].detach().cpu().tolist()
+            return scale.detach().cpu().tolist()
+        if isinstance(scale, (int, float)):
+            return [float(scale)]
+
+    cfg_scale = getattr(getattr(term, "cfg", None), "scale", None)
+    if isinstance(cfg_scale, (int, float)):
+        action_dim = int(getattr(term, "action_dim", 1))
+        return [float(cfg_scale)] * action_dim
+    if isinstance(cfg_scale, torch.Tensor):
+        if cfg_scale.ndim == 0:
+            return [float(cfg_scale.detach().cpu().item())]
+        return cfg_scale.detach().cpu().tolist()
+
+    return []
+
+
 def export_motion_policy_as_onnx(
     env: ManagerBasedRLEnv,
     actor_critic: object,
@@ -31,7 +80,7 @@ def export_motion_policy_as_onnx(
 class _OnnxMotionPolicyExporter(_OnnxPolicyExporter):
     def __init__(self, env: ManagerBasedRLEnv, actor_critic, normalizer=None, verbose=False):
         super().__init__(actor_critic, normalizer, verbose)
-        cmd: MotionCommand = env.command_manager.get_term("motion")
+        cmd: MotionCommand = _resolve_motion_command(env)
 
         traj = cmd.motion.get_trajectory_data(0)
         self.joint_pos = traj["joint_pos"].to("cpu")
@@ -88,6 +137,8 @@ def list_to_csv_str(arr, *, decimals: int = 3, delimiter: str = ",") -> str:
 
 def attach_onnx_metadata(env: ManagerBasedRLEnv, run_path: str, path: str, filename="policy.onnx") -> None:
     onnx_path = os.path.join(path, filename)
+    motion_cmd: MotionCommand = _resolve_motion_command(env)
+    joint_pos_action_term = env.action_manager.get_term("joint_pos")
 
     observation_names = env.observation_manager.active_terms["policy"]
     observation_history_lengths: list[int] = []
@@ -115,9 +166,9 @@ def attach_onnx_metadata(env: ManagerBasedRLEnv, run_path: str, path: str, filen
         "command_names": env.command_manager.active_terms,
         "observation_names": observation_names,
         "observation_history_lengths": observation_history_lengths,
-        "action_scale": env.action_manager.get_term("joint_pos")._scale[0].cpu().tolist(),
-        "anchor_body_name": env.command_manager.get_term("motion").cfg.anchor_body_name,
-        "body_names": env.command_manager.get_term("motion").cfg.body_names,
+        "action_scale": _action_scale_to_list(joint_pos_action_term),
+        "anchor_body_name": motion_cmd.cfg.anchor_body_name,
+        "body_names": motion_cmd.cfg.body_names,
     }
 
     model = onnx.load(onnx_path)

@@ -73,6 +73,18 @@ parser.add_argument(
     help="Optional local path to motion .npz. If provided, wandb registry is skipped.",
 )
 parser.add_argument(
+    "--low_level_policy_1_motion_file",
+    type=str,
+    default=None,
+    help="Optional local path to motion .npz for low-level policy #1 in hierarchical switch tasks.",
+)
+parser.add_argument(
+    "--low_level_policy_2_motion_file",
+    type=str,
+    default=None,
+    help="Optional local path to motion .npz for low-level policy #2 in hierarchical switch tasks.",
+)
+parser.add_argument(
     "--low_level_policy_1_checkpoint",
     type=str,
     default=None,
@@ -310,6 +322,52 @@ def _has_motion_command(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectM
     )
 
 
+def _has_hierarchical_motion_commands(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> bool:
+    return bool(
+        hasattr(env_cfg, "commands")
+        and hasattr(env_cfg.commands, "motion_policy_1")
+        and hasattr(env_cfg.commands, "motion_policy_2")
+        and getattr(env_cfg.commands, "motion_policy_1", None) is not None
+        and getattr(env_cfg.commands, "motion_policy_2", None) is not None
+    )
+
+
+def _resolve_local_motion_file(path: str, arg_name: str) -> str:
+    motion_file = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(motion_file):
+        raise FileNotFoundError(f"{arg_name} not found: {motion_file}")
+    return motion_file
+
+
+def _resolve_motion_file_or_registry(
+    *,
+    motion_file: str | None,
+    registry_name: str | None,
+    source_name: str,
+) -> tuple[str, str | None]:
+    if motion_file is not None:
+        resolved_path = _resolve_local_motion_file(motion_file, "--motion_file")
+        print(f"[INFO]: Using local motion file for {source_name}: {resolved_path}")
+        return resolved_path, None
+
+    if registry_name is None:
+        raise ValueError(
+            f"Provide --motion_file, or provide --registry_name to fetch motion.npz from wandb for {source_name}."
+        )
+
+    resolved_registry = registry_name if ":" in registry_name else f"{registry_name}:latest"
+
+    import pathlib
+
+    import wandb
+
+    print(f"[INFO]: Downloading motion artifact from wandb for {source_name}: {resolved_registry}")
+    api = wandb.Api()
+    artifact = api.artifact(resolved_registry)
+    resolved_path = str(pathlib.Path(artifact.download()) / "motion.npz")
+    return resolved_path, resolved_registry
+
+
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Train with RSL-RL agent."""
@@ -330,31 +388,85 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _disable_domain_randomization(env_cfg)
 
     registry_name = None
-    # load motion file from local path or wandb registry (only for tasks that use motion command)
-    if _has_motion_command(env_cfg):
-        if args_cli.motion_file is not None:
-            motion_file = os.path.abspath(os.path.expanduser(args_cli.motion_file))
-            if not os.path.isfile(motion_file):
-                raise FileNotFoundError(f"Motion file not found: {motion_file}")
-            print(f"[INFO]: Using local motion file: {motion_file}")
-            env_cfg.commands.motion.motion_file = motion_file
+    has_motion_command = _has_motion_command(env_cfg)
+    has_hierarchical_motion_commands = _has_hierarchical_motion_commands(env_cfg)
+
+    # load motion file(s) from local path(s) or wandb registry
+    if has_hierarchical_motion_commands:
+        using_policy_specific_motion_files = (
+            args_cli.low_level_policy_1_motion_file is not None
+            or args_cli.low_level_policy_2_motion_file is not None
+        )
+
+        if using_policy_specific_motion_files:
+            if args_cli.low_level_policy_1_motion_file is None or args_cli.low_level_policy_2_motion_file is None:
+                raise ValueError(
+                    "Provide both --low_level_policy_1_motion_file and --low_level_policy_2_motion_file for "
+                    "hierarchical switch tasks."
+                )
+
+            if args_cli.motion_file is not None or args_cli.registry_name is not None:
+                print(
+                    "[WARN]: Ignoring shared --motion_file/--registry_name because policy-specific motion files "
+                    "were provided."
+                )
+
+            motion_file_policy_1 = _resolve_local_motion_file(
+                args_cli.low_level_policy_1_motion_file,
+                "--low_level_policy_1_motion_file",
+            )
+            motion_file_policy_2 = _resolve_local_motion_file(
+                args_cli.low_level_policy_2_motion_file,
+                "--low_level_policy_2_motion_file",
+            )
+            env_cfg.commands.motion_policy_1.motion_file = motion_file_policy_1
+            env_cfg.commands.motion_policy_2.motion_file = motion_file_policy_2
+
+            # Keep legacy "motion" term aligned with policy #1 for compatibility with tooling/debug.
+            if has_motion_command:
+                env_cfg.commands.motion.motion_file = motion_file_policy_1
+
+            print(
+                "[INFO]: Using hierarchical per-policy motion files: "
+                f"policy_1='{motion_file_policy_1}', policy_2='{motion_file_policy_2}'."
+            )
         else:
-            if args_cli.registry_name is None:
-                raise ValueError("Provide --motion_file, or provide --registry_name to fetch motion.npz from wandb.")
-            registry_name = args_cli.registry_name
-            if ":" not in registry_name:  # Check if the registry name includes alias, if not, append ":latest"
-                registry_name += ":latest"
-            import pathlib
-
-            import wandb
-
-            print(f"[INFO]: Downloading motion artifact from wandb: {registry_name}")
-            api = wandb.Api()
-            artifact = api.artifact(registry_name)
-            env_cfg.commands.motion.motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
+            shared_motion_file, registry_name = _resolve_motion_file_or_registry(
+                motion_file=args_cli.motion_file,
+                registry_name=args_cli.registry_name,
+                source_name="hierarchical shared reference",
+            )
+            if has_motion_command:
+                env_cfg.commands.motion.motion_file = shared_motion_file
+            env_cfg.commands.motion_policy_1.motion_file = shared_motion_file
+            env_cfg.commands.motion_policy_2.motion_file = shared_motion_file
+            print(
+                "[INFO]: Using shared motion file for both hierarchical low-level policies: "
+                f"{shared_motion_file}"
+            )
+    elif has_motion_command:
+        motion_file, registry_name = _resolve_motion_file_or_registry(
+            motion_file=args_cli.motion_file,
+            registry_name=args_cli.registry_name,
+            source_name="task motion command",
+        )
+        env_cfg.commands.motion.motion_file = motion_file
+        if args_cli.low_level_policy_1_motion_file is not None or args_cli.low_level_policy_2_motion_file is not None:
+            print(
+                "[INFO]: Ignoring --low_level_policy_1_motion_file/--low_level_policy_2_motion_file because this "
+                "task does not define hierarchical motion commands."
+            )
     else:
-        if args_cli.motion_file is not None or args_cli.registry_name is not None:
-            print("[INFO]: This task has no motion command; ignoring --motion_file/--registry_name.")
+        if (
+            args_cli.motion_file is not None
+            or args_cli.registry_name is not None
+            or args_cli.low_level_policy_1_motion_file is not None
+            or args_cli.low_level_policy_2_motion_file is not None
+        ):
+            print(
+                "[INFO]: This task has no motion command; ignoring "
+                "--motion_file/--registry_name/--low_level_policy_1_motion_file/--low_level_policy_2_motion_file."
+            )
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)

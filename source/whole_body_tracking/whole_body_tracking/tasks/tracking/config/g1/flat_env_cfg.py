@@ -38,6 +38,37 @@ def _make_feet_contact_force_obs_term(scale: float = 0.01, noise: Unoise | None 
     return ObsTerm(**term_kwargs)
 
 
+def _make_low_level_obs_from_flat_policy(
+    flat_policy_obs_cfg: ObsGroup,
+    action_buffer_name: str,
+    motion_command_name: str,
+) -> ObsGroup:
+    """Reuse flat-policy observation config for frozen low-level policies.
+
+    The `actions` channel is replaced with per-policy external action history so each
+    low-level policy receives its own autoregressive action state. Motion-reference
+    terms are retargeted to the provided motion command name.
+    """
+    low_level_obs = copy.deepcopy(flat_policy_obs_cfg)
+    low_level_obs.enable_corruption = False
+    low_level_obs.history_length = 0
+
+    if not hasattr(low_level_obs, "actions"):
+        raise RuntimeError("Flat-policy observation config has no `actions` term to override for low-level policy.")
+
+    low_level_obs.actions.func = mdp.external_delta_action
+    low_level_obs.actions.params = {"action_buffer_name": action_buffer_name}
+
+    for obs_term_cfg in vars(low_level_obs).values():
+        params = getattr(obs_term_cfg, "params", None)
+        if isinstance(params, dict) and params.get("command_name") == "motion":
+            updated_params = dict(params)
+            updated_params["command_name"] = motion_command_name
+            obs_term_cfg.params = updated_params
+
+    return low_level_obs
+
+
 @configclass
 class DeltaPolicyObsCfg(ObsGroup):
     """Observation group consumed by the frozen delta policy during finetuning."""
@@ -377,6 +408,8 @@ class G1GapHighLevelPolicyObsCfg(ObsGroup):
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
+    # High-level switch policy receives its own previous action for autoregressive context.
+    actions = ObsTerm(func=mdp.last_action, scale=1.0)
 
     def __post_init__(self):
         self.enable_corruption = False
@@ -397,24 +430,6 @@ class G1GapSwitchHierarchicalEnvCfg(G1GapSwitchScanEnvCfg):
     goal_reward_std: float = 1.0
     goal_reached_threshold: float = 0.35
     base_height_termination_threshold: float = 0.2
-
-    @staticmethod
-    def _make_low_level_obs_from_flat_policy(flat_policy_obs_cfg: ObsGroup, action_buffer_name: str) -> ObsGroup:
-        """Reuse flat-policy observation config for frozen low-level policies.
-
-        The `actions` channel is replaced with per-policy external action history so each
-        low-level policy receives its own autoregressive action state.
-        """
-        low_level_obs = copy.deepcopy(flat_policy_obs_cfg)
-        low_level_obs.enable_corruption = False
-        low_level_obs.history_length = 0
-
-        if not hasattr(low_level_obs, "actions"):
-            raise RuntimeError("Flat-policy observation config has no `actions` term to override for low-level policy.")
-
-        low_level_obs.actions.func = mdp.external_delta_action
-        low_level_obs.actions.params = {"action_buffer_name": action_buffer_name}
-        return low_level_obs
 
     def _resolve_goal_offset(self) -> tuple[float, float, float]:
         if self.gap_course.gap_centers_x is not None and len(self.gap_course.gap_centers_x) > 0:
@@ -438,6 +453,12 @@ class G1GapSwitchHierarchicalEnvCfg(G1GapSwitchScanEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
+        if self.commands.motion is None:
+            raise RuntimeError("Hierarchical switch task requires base `commands.motion` config.")
+
+        self.commands.motion_policy_1 = copy.deepcopy(self.commands.motion)
+        self.commands.motion_policy_2 = copy.deepcopy(self.commands.motion)
+
         goal_offset = self._resolve_goal_offset()
         grid_shape, _, _ = resolve_scan_grid_config(self.high_level_scan)
         flat_policy_obs_cfg = copy.deepcopy(self.observations.policy)
@@ -454,13 +475,15 @@ class G1GapSwitchHierarchicalEnvCfg(G1GapSwitchScanEnvCfg):
 
         # Low-level observation groups consumed by frozen policies inside action term.
         # Reuse G1 flat-policy observation structure to match low-level checkpoints.
-        low_level_obs_1 = self._make_low_level_obs_from_flat_policy(
+        low_level_obs_1 = _make_low_level_obs_from_flat_policy(
             flat_policy_obs_cfg,
             action_buffer_name="low_level_policy_1_last_actions",
+            motion_command_name="motion_policy_1",
         )
-        low_level_obs_2 = self._make_low_level_obs_from_flat_policy(
+        low_level_obs_2 = _make_low_level_obs_from_flat_policy(
             flat_policy_obs_cfg,
             action_buffer_name="low_level_policy_2_last_actions",
+            motion_command_name="motion_policy_2",
         )
 
         self.actions.joint_pos = mdp.HighLevelPolicySwitchActionCfg(
