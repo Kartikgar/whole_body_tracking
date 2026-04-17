@@ -408,6 +408,7 @@ class G1GapHighLevelPolicyObsCfg(ObsGroup):
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
+    joint_pos = ObsTerm(func=mdp.joint_pos_rel, scale=1.0)
     # High-level switch policy receives its own previous action for autoregressive context.
     actions = ObsTerm(func=mdp.last_action, scale=1.0)
 
@@ -456,6 +457,7 @@ class G1GapSwitchHierarchicalEnvCfg(G1GapSwitchScanEnvCfg):
         if self.commands.motion is None:
             raise RuntimeError("Hierarchical switch task requires base `commands.motion` config.")
 
+        self.commands.motion.adaptive_sampling = False
         self.commands.motion_policy_1 = copy.deepcopy(self.commands.motion)
         self.commands.motion_policy_2 = copy.deepcopy(self.commands.motion)
 

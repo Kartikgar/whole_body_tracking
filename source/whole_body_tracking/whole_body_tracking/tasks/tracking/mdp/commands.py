@@ -640,6 +640,20 @@ class MotionCommand(CommandTerm):
         self.metrics["sampling_top1_prob"][:] = pmax
         self.metrics["sampling_top1_bin"][:] = imax.float() / self.bin_count
 
+    def _uniform_sampling(self, env_ids: Sequence[int]):
+        sampled_bins = torch.randint(0, self.bin_count, (len(env_ids),), device=self.device)
+        sampled_lengths = torch.clamp(self.motion.trajectory_time_step_total[self.trajectory_ids[env_ids]], min=1)
+        sampled_time_steps = (
+            (sampled_bins + sample_uniform(0.0, 1.0, (len(env_ids),), device=self.device))
+            / self.bin_count
+            * (sampled_lengths - 1)
+        ).long()
+        self.time_steps[env_ids] = torch.clamp(sampled_time_steps, min=0)
+
+        self.metrics["sampling_entropy"][:] = 1.0
+        self.metrics["sampling_top1_prob"][:] = 1.0 / float(self.bin_count)
+        self.metrics["sampling_top1_bin"][:] = 0.0
+
     def _sample_trajectory_ids(self, env_ids: Sequence[int]):
         if len(env_ids) == 0:
             return
@@ -667,7 +681,10 @@ class MotionCommand(CommandTerm):
         if len(env_ids) == 0:
             return
         self._sample_trajectory_ids(env_ids)
-        self._adaptive_sampling(env_ids)
+        if self.cfg.adaptive_sampling:
+            self._adaptive_sampling(env_ids)
+        else:
+            self._uniform_sampling(env_ids)
 
         root_pos = self.body_pos_w[:, 0].clone()
         root_ori = self.body_quat_w[:, 0].clone()
@@ -718,9 +735,12 @@ class MotionCommand(CommandTerm):
         self.body_quat_relative_w = quat_mul(delta_ori_w, self.body_quat_w)
         self.body_pos_relative_w = delta_pos_w + quat_apply(delta_ori_w, self.body_pos_w - anchor_pos_w_repeat)
 
-        self.bin_failed_count = (
-            self.cfg.adaptive_alpha * self._current_bin_failed + (1 - self.cfg.adaptive_alpha) * self.bin_failed_count
-        )
+        if self.cfg.adaptive_sampling:
+            self.bin_failed_count = (
+                self.cfg.adaptive_alpha * self._current_bin_failed + (1 - self.cfg.adaptive_alpha) * self.bin_failed_count
+            )
+        else:
+            self.bin_failed_count.zero_()
         self._current_bin_failed.zero_()
 
     def _set_debug_vis_impl(self, debug_vis: bool):
@@ -797,6 +817,7 @@ class MotionCommandCfg(CommandTermCfg):
 
     joint_position_range: tuple[float, float] = (-0.52, 0.52)
 
+    adaptive_sampling: bool = True
     adaptive_kernel_size: int = 1
     adaptive_lambda: float = 0.8
     adaptive_uniform_ratio: float = 0.1
