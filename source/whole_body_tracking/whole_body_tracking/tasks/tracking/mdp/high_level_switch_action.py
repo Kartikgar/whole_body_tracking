@@ -4,6 +4,7 @@ import copy
 from collections.abc import Sequence
 from dataclasses import MISSING
 from pathlib import Path
+from typing import Literal
 
 import torch
 import yaml
@@ -22,14 +23,14 @@ from isaaclab.utils import configclass
 
 
 class HighLevelPolicySwitchAction(ActionTerm):
-    """High-level 1D switch action that routes between two frozen low-level policies."""
+    """High-level switch action that routes between two frozen low-level policies."""
 
     cfg: HighLevelPolicySwitchActionCfg
 
     def __init__(self, cfg: HighLevelPolicySwitchActionCfg, env):
         super().__init__(cfg, env)
 
-        self._raw_actions = torch.zeros(self.num_envs, 1, device=self.device)
+        self._raw_actions = torch.zeros(self.num_envs, self.action_dim, device=self.device)
         self._processed_actions = torch.zeros_like(self._raw_actions)
         self._selected_policy = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
@@ -74,6 +75,8 @@ class HighLevelPolicySwitchAction(ActionTerm):
 
     @property
     def action_dim(self) -> int:
+        if self.cfg.switch_action_space == "categorical":
+            return 2
         return 1
 
     @property
@@ -284,7 +287,27 @@ class HighLevelPolicySwitchAction(ActionTerm):
         return actions
 
     def process_actions(self, actions: torch.Tensor):
+        if actions.ndim != 2 or actions.shape != self._raw_actions.shape:
+            raise RuntimeError(
+                f"High-level switch action shape mismatch: got {tuple(actions.shape)}, "
+                f"expected {tuple(self._raw_actions.shape)}."
+            )
+
         self._raw_actions[:] = actions
+
+        if self.cfg.switch_action_space == "categorical":
+            # Interpret high-level outputs as a 2-way categorical distribution over low-level policies.
+            if self.cfg.categorical_input_is_logits:
+                probs = torch.softmax(self._raw_actions, dim=-1)
+            else:
+                probs = torch.clamp(self._raw_actions, min=0.0)
+                prob_sum = probs.sum(dim=-1, keepdim=True)
+                invalid = prob_sum <= 1.0e-6
+                probs = probs / torch.where(invalid, torch.ones_like(prob_sum), prob_sum)
+                if torch.any(invalid):
+                    probs[invalid.expand_as(probs)] = 0.5
+            self._processed_actions[:] = probs
+            return
 
         switch_prob = self._raw_actions[:, 0]
         if self.cfg.use_sigmoid:
@@ -323,7 +346,11 @@ class HighLevelPolicySwitchAction(ActionTerm):
             self._policy_1_last_actions[:] = low_level_actions_1
             self._policy_2_last_actions[:] = low_level_actions_2
 
-            select_policy_1 = self._processed_actions[:, 0] > self.cfg.switch_threshold
+            if self.cfg.switch_action_space == "categorical":
+                # Index 0 maps to policy 1, index 1 maps to policy 2.
+                select_policy_1 = self._processed_actions[:, 0] >= self._processed_actions[:, 1]
+            else:
+                select_policy_1 = self._processed_actions[:, 0] > self.cfg.switch_threshold
             self._selected_policy[:] = torch.where(
                 select_policy_1,
                 torch.ones_like(self._selected_policy),
@@ -367,8 +394,10 @@ class HighLevelPolicySwitchActionCfg(ActionTermCfg):
     policy_2_observations: ObservationGroupCfg = MISSING
 
     low_level_decimation: int = 1
+    switch_action_space: Literal["bernoulli", "categorical"] = "bernoulli"
     switch_threshold: float = 0.5
     use_sigmoid: bool = True
+    categorical_input_is_logits: bool = True
     low_level_action_clip: float | None = None
 
     policy_1_last_action_buffer_name: str = "low_level_policy_1_last_actions"

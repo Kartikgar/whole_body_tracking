@@ -495,8 +495,8 @@ class G1GapSwitchHierarchicalEnvCfg(G1GapSwitchScanEnvCfg):
             policy_1_observations=low_level_obs_1,
             policy_2_observations=low_level_obs_2,
             low_level_decimation=1,
-            switch_threshold=0.5,
-            use_sigmoid=True,
+            switch_action_space="categorical",
+            categorical_input_is_logits=True,
             low_level_action_clip=self.low_level_action_clip,
             low_level_actions=mdp.JointPositionActionCfg(
                 asset_name="robot",
@@ -578,3 +578,27 @@ class G1GapSwitchHierarchicalEnvCfg(G1GapSwitchScanEnvCfg):
         )
 
         self.episode_length_s = 8.0
+
+
+@configclass
+class G1FlatSwitchHierarchicalEnvCfg(G1GapSwitchHierarchicalEnvCfg):
+    """Flat-ground task with goal reward and high-level switch between two frozen low-level policies."""
+
+    flat_goal_forward_distance: float = 2.0
+
+    def _resolve_goal_offset(self) -> tuple[float, float, float]:
+        return (float(max(self.flat_goal_forward_distance, 0.1)), float(self.goal_lateral_offset), 0.0)
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        terrain_physics_material = self.scene.terrain.physics_material
+        terrain_visual_material = self.scene.terrain.visual_material
+        self.scene.terrain = terrain_gen.TerrainImporterCfg(
+            prim_path="/World/ground",
+            terrain_type="plane",
+            collision_group=-1,
+            physics_material=terrain_physics_material,
+            visual_material=terrain_visual_material,
+            debug_vis=False,
+        )
