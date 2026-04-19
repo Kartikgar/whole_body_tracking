@@ -21,6 +21,27 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--motion_file", type=str, default=None, help="Path to the motion file.")
 parser.add_argument(
+    "--manual_switch_after_steps",
+    type=int,
+    default=None,
+    help=(
+        "If set, manually override hierarchical switch action in play mode. "
+        "Use `--manual_switch_prob_before` before this step and `--manual_switch_prob_after` from this step onward."
+    ),
+)
+parser.add_argument(
+    "--manual_switch_prob_before",
+    type=float,
+    default=0.0,
+    help="Manual hierarchical switch probability before --manual_switch_after_steps.",
+)
+parser.add_argument(
+    "--manual_switch_prob_after",
+    type=float,
+    default=1.0,
+    help="Manual hierarchical switch probability at/after --manual_switch_after_steps.",
+)
+parser.add_argument(
     "--low_level_policy_1_motion_file",
     type=str,
     default=None,
@@ -32,11 +53,32 @@ parser.add_argument(
     default=None,
     help="Optional local path to motion .npz for low-level policy #2 in hierarchical switch tasks.",
 )
+parser.add_argument(
+    "--low_level_policy_1_checkpoint",
+    type=str,
+    default=None,
+    help="Path to frozen low-level policy #1 checkpoint for hierarchical switch tasks.",
+)
+parser.add_argument(
+    "--low_level_policy_2_checkpoint",
+    type=str,
+    default=None,
+    help="Path to frozen low-level policy #2 checkpoint for hierarchical switch tasks.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+# Fail fast on unknown CLI-style flags instead of forwarding them to Hydra, which raises
+# less actionable lexer errors for tokens like mistyped `--flag` names.
+unknown_cli_flags = [arg for arg in hydra_args if arg.startswith("--")]
+if unknown_cli_flags:
+    parser.error(
+        "Unrecognized arguments: "
+        + " ".join(unknown_cli_flags)
+        + ". If these are Hydra overrides, pass them as key=value (without leading '--')."
+    )
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -81,11 +123,58 @@ def _resolve_local_motion_file(path: str, arg_name: str) -> str:
     return motion_file
 
 
+def _switch_probability_to_action_value(probability: float, use_sigmoid: bool, device: torch.device) -> torch.Tensor:
+    """Convert desired switch probability to the action value expected by HighLevelPolicySwitchAction."""
+    probability = float(probability)
+    if probability < 0.0 or probability > 1.0:
+        raise ValueError(f"Switch probability must be in [0, 1], got {probability}.")
+    if use_sigmoid:
+        # Inverse sigmoid so the processed action matches the requested probability.
+        eps = 1.0e-6
+        probability = min(max(probability, eps), 1.0 - eps)
+        return torch.logit(torch.tensor(probability, device=device, dtype=torch.float32))
+    return torch.tensor(probability, device=device, dtype=torch.float32)
+
+
+def _configure_hierarchical_switch_policies(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg):
+    """Apply CLI checkpoint overrides for hierarchical high-level switch action tasks."""
+    joint_pos_cfg = getattr(getattr(env_cfg, "actions", None), "joint_pos", None)
+    if joint_pos_cfg is None:
+        return
+    if not (hasattr(joint_pos_cfg, "policy_1_checkpoint") and hasattr(joint_pos_cfg, "policy_2_checkpoint")):
+        return
+
+    if args_cli.low_level_policy_1_checkpoint is not None:
+        ckpt_1 = os.path.abspath(os.path.expanduser(args_cli.low_level_policy_1_checkpoint))
+        if not os.path.isfile(ckpt_1):
+            raise FileNotFoundError(f"Low-level policy #1 checkpoint not found: {ckpt_1}")
+        joint_pos_cfg.policy_1_checkpoint = ckpt_1
+
+    if args_cli.low_level_policy_2_checkpoint is not None:
+        ckpt_2 = os.path.abspath(os.path.expanduser(args_cli.low_level_policy_2_checkpoint))
+        if not os.path.isfile(ckpt_2):
+            raise FileNotFoundError(f"Low-level policy #2 checkpoint not found: {ckpt_2}")
+        joint_pos_cfg.policy_2_checkpoint = ckpt_2
+
+    if not getattr(joint_pos_cfg, "policy_1_checkpoint", "") or not getattr(joint_pos_cfg, "policy_2_checkpoint", ""):
+        raise ValueError(
+            "Hierarchical switch play requires both low-level checkpoints. Provide "
+            "`--low_level_policy_1_checkpoint` and `--low_level_policy_2_checkpoint`."
+        )
+
+    print(
+        "[INFO]: Hierarchical switch policies configured for play: "
+        f"policy_1='{joint_pos_cfg.policy_1_checkpoint}', "
+        f"policy_2='{joint_pos_cfg.policy_2_checkpoint}'."
+    )
+
+
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Play with RSL-RL agent."""
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    _configure_hierarchical_switch_policies(env_cfg)
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
@@ -125,9 +214,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             env_cfg.commands.motion.motion_file = str(pathlib.Path(art.download()) / "motion.npz")
 
     else:
-        print(f"[INFO] Loading experiment from directory: {log_root_path}")
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
-        print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+        # Treat --checkpoint as an explicit checkpoint file path when provided.
+        explicit_checkpoint = args_cli.checkpoint or getattr(agent_cfg, "load_checkpoint", None)
+        if explicit_checkpoint is not None:
+            resume_path = os.path.abspath(os.path.expanduser(str(explicit_checkpoint)))
+            if not os.path.isfile(resume_path):
+                raise FileNotFoundError(
+                    f"Checkpoint file not found: {resume_path}. "
+                    "Pass `--checkpoint /abs/path/to/model_x.pt`."
+                )
+            print(f"[INFO]: Loading model checkpoint from explicit path: {resume_path}")
+        else:
+            print(f"[INFO] Loading experiment from directory: {log_root_path}")
+            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+            print(f"[INFO]: Loading model checkpoint from: {resume_path}")
 
     if args_cli.motion_file is not None:
         resolved_motion_file = _resolve_local_motion_file(args_cli.motion_file, "--motion_file")
@@ -230,12 +330,56 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # reset environment
     obs, _ = env.get_observations()
     timestep = 0
+    manual_switch_enabled = args_cli.manual_switch_after_steps is not None
+    manual_switch_action_before = None
+    manual_switch_action_after = None
+    manual_switch_has_announced_flip = False
+    if manual_switch_enabled:
+        if args_cli.manual_switch_after_steps < 0:
+            raise ValueError("--manual_switch_after_steps must be >= 0.")
+
+        joint_pos_cfg = getattr(getattr(env_cfg, "actions", None), "joint_pos", None)
+        if joint_pos_cfg is None or not hasattr(joint_pos_cfg, "switch_threshold"):
+            raise ValueError(
+                "--manual_switch_* options require a hierarchical switch task (actions.joint_pos with switch_threshold)."
+            )
+
+        switch_uses_sigmoid = bool(getattr(joint_pos_cfg, "use_sigmoid", True))
+        manual_switch_action_before = _switch_probability_to_action_value(
+            args_cli.manual_switch_prob_before,
+            use_sigmoid=switch_uses_sigmoid,
+            device=env.unwrapped.device,
+        )
+        manual_switch_action_after = _switch_probability_to_action_value(
+            args_cli.manual_switch_prob_after,
+            use_sigmoid=switch_uses_sigmoid,
+            device=env.unwrapped.device,
+        )
+        print(
+            "[INFO]: Manual switch override enabled: "
+            f"p_before={args_cli.manual_switch_prob_before} until step<{args_cli.manual_switch_after_steps}, "
+            f"p_after={args_cli.manual_switch_prob_after} from step>={args_cli.manual_switch_after_steps}."
+        )
+
     # simulate environment
     while simulation_app.is_running():
         # run everything in inference mode
         with torch.inference_mode():
             # agent stepping
             actions = policy(obs)
+            if manual_switch_enabled:
+                if actions.shape[1] < 1:
+                    raise RuntimeError(
+                        "Manual switch override requested, but action tensor has no switch dimension (shape="
+                        f"{tuple(actions.shape)})."
+                    )
+                if timestep < args_cli.manual_switch_after_steps:
+                    actions[:, 0] = manual_switch_action_before
+                else:
+                    actions[:, 0] = manual_switch_action_after
+                    if not manual_switch_has_announced_flip:
+                        print(f"[INFO]: Manual switch flipped at env step {timestep}.")
+                        manual_switch_has_announced_flip = True
             # env stepping
             obs, _, _, _ = env.step(actions)
         if args_cli.video:
@@ -243,6 +387,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
+        else:
+            timestep += 1
 
     # close the simulator
     env.close()
