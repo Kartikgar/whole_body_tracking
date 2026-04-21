@@ -169,6 +169,42 @@ def _configure_hierarchical_switch_policies(env_cfg: ManagerBasedRLEnvCfg | Dire
     )
 
 
+def _disable_adaptive_sampling_for_play(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg):
+    """Disable adaptive resampling for motion commands in play mode."""
+    commands_cfg = getattr(env_cfg, "commands", None)
+    if commands_cfg is None:
+        return
+
+    disabled_terms: list[str] = []
+    for command_name in ("motion", "motion_policy_1", "motion_policy_2"):
+        command_cfg = getattr(commands_cfg, command_name, None)
+        if command_cfg is None:
+            continue
+
+        updated = False
+        # Optional explicit switch for future compatibility.
+        if hasattr(command_cfg, "adaptive_sampling"):
+            command_cfg.adaptive_sampling = False
+            updated = True
+        # Force uniform sampling by freezing failure-bin updates.
+        if hasattr(command_cfg, "adaptive_alpha"):
+            command_cfg.adaptive_alpha = 0.0
+            updated = True
+        # Keep a positive uniform prior so probabilities remain well-defined.
+        if hasattr(command_cfg, "adaptive_uniform_ratio"):
+            command_cfg.adaptive_uniform_ratio = max(float(command_cfg.adaptive_uniform_ratio), 1.0)
+            updated = True
+
+        if updated:
+            disabled_terms.append(command_name)
+
+    if disabled_terms:
+        print(
+            "[INFO]: Disabled adaptive sampling for play on motion command(s): "
+            f"{', '.join(disabled_terms)}."
+        )
+
+
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Play with RSL-RL agent."""
@@ -284,6 +320,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "[INFO]: Ignoring --low_level_policy_1_motion_file/--low_level_policy_2_motion_file because this "
             "task does not define hierarchical motion commands."
         )
+
+    _disable_adaptive_sampling_for_play(env_cfg)
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
