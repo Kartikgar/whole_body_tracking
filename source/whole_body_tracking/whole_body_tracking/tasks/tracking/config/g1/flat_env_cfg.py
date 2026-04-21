@@ -425,6 +425,7 @@ class G1GapSwitchHierarchicalEnvCfg(G1GapSwitchScanEnvCfg):
     low_level_policy_1_checkpoint: str = ""
     low_level_policy_2_checkpoint: str = ""
     low_level_action_clip: float | None = None
+    enable_scan_dot_visualization: bool = True
 
     goal_margin_after_last_gap: float = 1.0
     goal_lateral_offset: float = 0.0
@@ -453,6 +454,10 @@ class G1GapSwitchHierarchicalEnvCfg(G1GapSwitchScanEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
+
+        # Show terrain scan rays/hits (scan-dot visualization) in hierarchical gap play/debug sessions.
+        if self.scene.terrain_scan is not None:
+            self.scene.terrain_scan.debug_vis = self.enable_scan_dot_visualization
 
         if self.commands.motion is None:
             raise RuntimeError("Hierarchical switch task requires base `commands.motion` config.")
@@ -544,10 +549,10 @@ class G1GapSwitchHierarchicalEnvCfg(G1GapSwitchScanEnvCfg):
                 "asset_cfg": SceneEntityCfg("robot"),
             },
         )
-        self.terminations.base_fall = DoneTerm(
-            func=mdp.base_height_below,
-            params={"threshold": self.base_height_termination_threshold, "asset_cfg": SceneEntityCfg("robot")},
-        )
+        # self.terminations.base_fall = DoneTerm(
+        #     func=mdp.base_height_below,
+        #     params={"threshold": self.base_height_termination_threshold, "asset_cfg": SceneEntityCfg("robot")},
+        # )
 
         # Stabilize resets for the hierarchical task.
         self.events.push_robot = None
