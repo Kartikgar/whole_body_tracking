@@ -109,10 +109,12 @@ class G1FlatEnvCfg(TrackingEnvCfg):
 
         self.scene.robot = G1_CYLINDER_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.actions.joint_pos.scale = G1_ACTION_SCALE
-        self.commands.motion.debug_vis_goal_relative_to_robot = False
+        self.commands.motion.debug_vis_goal_relative_to_robot = True
         self.commands.motion.debug_vis_show_current = False
         self.commands.motion.debug_vis_show_goal = True
         self.commands.motion.anchor_body_name = "torso_link"
+        self.rewards.motion_body_pos_global = None
+        self.rewards.motion_body_ori_global = None
         # self.commands.motion.body_names = [
         #     "pelvis",
         #     "left_hip_pitch_link",
@@ -214,11 +216,12 @@ class G1FlatDeltaAOpenLoopEnvCfg(G1FlatEnvCfg):
             "right_wrist_yaw_link",
         ]
         # Use global body pose rewards instead of relative-body pose rewards.
-        self.rewards.motion_body_pos = None
-        self.rewards.motion_body_ori = None
+        self.rewards.motion_body_pos_global = None
+        self.rewards.motion_body_ori_global = None
         self.rewards.penalty_minimal_action_norm = RewTerm(func=mdp.penalty_minimal_action_norm, weight=-0.1)
         self.terminations.ee_body_pos = None
         self.terminations.anchor_pos = None
+        self.terminations.anchor_ori=None
         self.episode_length_s = 10.0
 
 

@@ -87,7 +87,10 @@ parser.add_argument(
     "--enable_adaptive_reference_sampling",
     action="store_true",
     default=False,
-    help="Enable adaptive reference time-step sampling (disabled by default in play).",
+    help=(
+        "Deprecated flag. Adaptive reference time-step sampling is now always disabled in play "
+        "for deterministic evaluation."
+    ),
 )
 parser.add_argument(
     "--record_delta_model_dataset",
@@ -450,7 +453,7 @@ class _DeltaModelTrajectoryRecorder:
         self.num_envs = int(num_envs)
         self.fps = float(fps)
         self.target_trajectories = max(int(target_trajectories), 0)
-        self.obs_component_keys: list[str] = []
+        self.component_keys: list[str] = []
         self.action_key = "actions"
         self.traj_buffers: list[dict[str, list[np.ndarray]]] = [{self.action_key: []} for _ in range(self.num_envs)]
         self.collected_trajectories: list[dict[str, np.ndarray]] = []
@@ -464,38 +467,40 @@ class _DeltaModelTrajectoryRecorder:
     def has_reached_target(self) -> bool:
         return self.target_trajectories > 0 and self.collected_count >= self.target_trajectories
 
-    def _ensure_obs_component_keys(self, obs_components: dict[str, torch.Tensor]):
-        keys = list(obs_components.keys())
+    def _ensure_component_keys(self, components: dict[str, torch.Tensor]):
+        keys = list(components.keys())
         if len(keys) == 0:
-            raise AssertionError("Observation component dictionary is empty.")
-        if len(self.obs_component_keys) == 0:
-            self.obs_component_keys = keys
+            raise AssertionError("Logged component dictionary is empty.")
+        if len(self.component_keys) == 0:
+            self.component_keys = keys
             for env_id in range(self.num_envs):
-                for key in self.obs_component_keys:
+                for key in self.component_keys:
                     self.traj_buffers[env_id][key] = []
             return
-        if keys != self.obs_component_keys:
+        if keys != self.component_keys:
             raise AssertionError(
-                "Observation component keys changed during rollout: "
-                f"expected {self.obs_component_keys}, got {keys}."
+                "Logged component keys changed during rollout: "
+                f"expected {self.component_keys}, got {keys}."
             )
 
-    def append_step(self, obs_components: dict[str, torch.Tensor], action_batch: torch.Tensor):
-        self._ensure_obs_component_keys(obs_components)
+    def append_step(self, components: dict[str, torch.Tensor], action_batch: torch.Tensor):
+        self._ensure_component_keys(components)
         action_np = action_batch.detach().to("cpu", dtype=torch.float32).numpy()
         if action_np.ndim != 2 or action_np.shape[0] != self.num_envs:
             raise AssertionError(f"Expected action shape [num_envs, A], got {action_np.shape}.")
 
-        obs_np_map: dict[str, np.ndarray] = {}
-        for key in self.obs_component_keys:
-            obs_np = obs_components[key].detach().to("cpu", dtype=torch.float32).numpy()
-            if obs_np.ndim != 2 or obs_np.shape[0] != self.num_envs:
-                raise AssertionError(f"Expected observation component '{key}' shape [num_envs, D], got {obs_np.shape}.")
-            obs_np_map[key] = obs_np
+        component_np_map: dict[str, np.ndarray] = {}
+        for key in self.component_keys:
+            component_np = components[key].detach().to("cpu", dtype=torch.float32).numpy()
+            if component_np.ndim < 2 or component_np.shape[0] != self.num_envs:
+                raise AssertionError(
+                    f"Expected logged component '{key}' shape [num_envs, ...], got {component_np.shape}."
+                )
+            component_np_map[key] = component_np
 
         for env_id in range(self.num_envs):
-            for key in self.obs_component_keys:
-                self.traj_buffers[env_id][key].append(obs_np_map[key][env_id].astype(np.float32).copy())
+            for key in self.component_keys:
+                self.traj_buffers[env_id][key].append(component_np_map[key][env_id].astype(np.float32).copy())
             self.traj_buffers[env_id][self.action_key].append(action_np[env_id].astype(np.float32).copy())
 
     def finalize_done(self, dones: torch.Tensor) -> int:
@@ -526,7 +531,7 @@ class _DeltaModelTrajectoryRecorder:
             return 0
         if len(self.traj_buffers[env_id][self.action_key]) == 0:
             return 0
-        keys = [*self.obs_component_keys, self.action_key]
+        keys = [*self.component_keys, self.action_key]
         traj = {key: np.stack(self.traj_buffers[env_id][key], axis=0).astype(np.float32) for key in keys}
         self.collected_trajectories.append(traj)
         self.traj_buffers[env_id] = {key: [] for key in keys}
@@ -547,22 +552,24 @@ class _DeltaModelTrajectoryRecorder:
             else self.collected_trajectories[: self.target_trajectories]
         )
         motion_length = max(int(traj[self.action_key].shape[0]) for traj in trajs)
-        action_dim = int(trajs[0][self.action_key].reshape(trajs[0][self.action_key].shape[0], -1).shape[1])
-        obs_dims = {
-            key: int(trajs[0][key].reshape(trajs[0][key].shape[0], -1).shape[1]) for key in self.obs_component_keys
-        }
+        payload_keys = [*self.component_keys, self.action_key]
+        feature_shapes = {key: tuple(trajs[0][key].shape[1:]) for key in payload_keys}
 
         payload: dict[str, np.ndarray] = {
             "fps": np.array([self.fps], dtype=np.float32),
         }
 
-        for key, expected_dim in [*(list(obs_dims.items())), (self.action_key, action_dim)]:
+        for key in payload_keys:
             stacked: list[np.ndarray] = []
+            expected_feature_shape = feature_shapes[key]
             for traj in trajs:
-                seq = traj[key].astype(np.float32).reshape(traj[key].shape[0], -1)
-                if seq.shape[1] != expected_dim:
+                seq = traj[key].astype(np.float32)
+                if seq.ndim < 2:
+                    raise AssertionError(f"Trajectory key '{key}' must include a time and feature dimension, got {seq.shape}.")
+                if tuple(seq.shape[1:]) != expected_feature_shape:
                     raise AssertionError(
-                        f"Trajectory key '{key}' dim mismatch: expected {expected_dim}, got {seq.shape[1]}."
+                        f"Trajectory key '{key}' shape mismatch: expected tail {expected_feature_shape}, "
+                        f"got {tuple(seq.shape[1:])}."
                     )
                 if seq.shape[0] <= 0:
                     raise AssertionError(f"Trajectory key '{key}' has empty time dimension.")
@@ -575,14 +582,7 @@ class _DeltaModelTrajectoryRecorder:
             payload[key] = np.stack(stacked, axis=0).astype(np.float32)
 
         expected_num_traj = len(trajs)
-        expected_shapes = {
-            key: (expected_num_traj, motion_length, dim) for key, dim in obs_dims.items()
-        }
-        expected_shapes.update(
-            {
-                self.action_key: (expected_num_traj, motion_length, action_dim),
-            }
-        )
+        expected_shapes = {key: (expected_num_traj, motion_length, *feature_shape) for key, feature_shape in feature_shapes.items()}
         fps = payload["fps"]
         if fps.ndim != 1 or fps.shape[0] != 1 or not np.isfinite(fps).all() or float(fps[0]) <= 0.0:
             raise AssertionError(f"Invalid `fps` payload shape/value: shape={fps.shape}, value={fps}")
@@ -613,6 +613,74 @@ def _resolve_obs_components_for_logging(
     return _split_obs_into_term_components(obs_batch=obs_batch, split_dims=split_dims, payload_keys=payload_keys)
 
 
+def _resolve_robot_body_world_components_for_logging(env) -> dict[str, torch.Tensor]:
+    command_manager = getattr(env, "command_manager", None)
+    if command_manager is None:
+        return {}
+
+    try:
+        motion_term = command_manager.get_term("motion")
+    except Exception:
+        return {}
+
+    body_pos_w = getattr(motion_term, "robot_body_pos_w", None)
+    body_quat_w = getattr(motion_term, "robot_body_quat_w", None)
+    if not isinstance(body_pos_w, torch.Tensor) or not isinstance(body_quat_w, torch.Tensor):
+        return {}
+
+    if body_pos_w.ndim != 3 or int(body_pos_w.shape[-1]) != 3:
+        raise AssertionError(f"Expected robot body positions as [num_envs, num_bodies, 3], got {tuple(body_pos_w.shape)}.")
+    if body_quat_w.ndim != 3 or int(body_quat_w.shape[-1]) != 4:
+        raise AssertionError(
+            f"Expected robot body quaternions as [num_envs, num_bodies, 4], got {tuple(body_quat_w.shape)}."
+        )
+
+    return {
+        "body_pos_w": body_pos_w,
+        "body_quat_w": body_quat_w,
+    }
+
+
+def _resolve_motion_command_components_for_logging(env) -> dict[str, torch.Tensor]:
+    command_manager = getattr(env, "command_manager", None)
+    if command_manager is None:
+        return {}
+
+    try:
+        motion_term = command_manager.get_term("motion")
+    except Exception:
+        return {}
+
+    component_map = {
+        "motion_joint_pos": getattr(motion_term, "joint_pos", None),
+        "motion_joint_vel": getattr(motion_term, "joint_vel", None),
+        "motion_anchor_pos_w": getattr(motion_term, "anchor_pos_w", None),
+        "motion_anchor_quat_w": getattr(motion_term, "anchor_quat_w", None),
+        "motion_anchor_lin_vel_w": getattr(motion_term, "anchor_lin_vel_w", None),
+        "motion_anchor_ang_vel_w": getattr(motion_term, "anchor_ang_vel_w", None),
+        "motion_body_pos_w": getattr(motion_term, "body_pos_w", None),
+        "motion_body_quat_w": getattr(motion_term, "body_quat_w", None),
+        "motion_body_lin_vel_w": getattr(motion_term, "body_lin_vel_w", None),
+        "motion_body_ang_vel_w": getattr(motion_term, "body_ang_vel_w", None),
+        "motion_body_pos_relative_w": getattr(motion_term, "body_pos_relative_w", None),
+        "motion_body_quat_relative_w": getattr(motion_term, "body_quat_relative_w", None),
+    }
+    if getattr(motion_term, "has_joint_action", False):
+        component_map["motion_joint_action"] = motion_term.joint_action
+
+    components: dict[str, torch.Tensor] = {}
+    for key, value in component_map.items():
+        if not isinstance(value, torch.Tensor):
+            continue
+        if int(value.shape[0]) != env.num_envs:
+            raise AssertionError(
+                f"Expected logged motion component '{key}' batch size {env.num_envs}, got {tuple(value.shape)}."
+            )
+        components[key] = value
+
+    return components
+
+
 def _get_motion_time_steps(env) -> torch.Tensor | None:
     command_manager = getattr(env, "command_manager", None)
     if command_manager is None:
@@ -635,18 +703,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     if _has_motion_command(env_cfg):
-        if not args_cli.enable_adaptive_reference_sampling:
-            env_cfg.commands.motion.adaptive_alpha = 0.0
-            env_cfg.commands.motion.sample_time_steps = False
+        env_cfg.commands.motion.adaptive_alpha = 0.0
+        env_cfg.commands.motion.sample_time_steps = False
+        print(
+            "[INFO]: Adaptive reference sampling is disabled for play "
+            "(commands.motion.adaptive_alpha=0.0, commands.motion.sample_time_steps=False)."
+        )
+        if args_cli.enable_adaptive_reference_sampling:
             print(
-                "[INFO]: Disabled adaptive reference sampling for play "
-                "(commands.motion.adaptive_alpha=0.0, commands.motion.sample_time_steps=False)."
+                "[WARN]: `--enable_adaptive_reference_sampling` is deprecated and ignored in play; "
+                "adaptive sampling remains disabled."
             )
-        else:
-            env_cfg.commands.motion.sample_time_steps = True
-            print("[INFO]: Adaptive reference sampling is enabled for play.")
     elif args_cli.enable_adaptive_reference_sampling:
-        print("[INFO]: This task has no motion command; ignoring --enable_adaptive_reference_sampling.")
+        print(
+            "[INFO]: This task has no motion command; `--enable_adaptive_reference_sampling` "
+            "is deprecated and ignored."
+        )
     motion_file_override = None
     if _has_motion_command(env_cfg) and args_cli.motion_file is not None:
         motion_file_override = os.path.abspath(os.path.expanduser(args_cli.motion_file))
@@ -849,7 +921,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     obs_batch=delta_log_obs,
                     split_cache=obs_split_cache,
                 )
-                delta_dataset_recorder.append_step(obs_components, delta_log_actions)
+                logged_components = dict(obs_components)
+                logged_components.update(_resolve_robot_body_world_components_for_logging(env.unwrapped))
+                logged_components.update(_resolve_motion_command_components_for_logging(env.unwrapped))
+                delta_dataset_recorder.append_step(logged_components, delta_log_actions)
             # env stepping
             # actions.zero_()
             # print(actions)
