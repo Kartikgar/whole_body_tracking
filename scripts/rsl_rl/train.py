@@ -152,7 +152,6 @@ def _configure_delta_action_space(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg
         return
 
     if args_cli.delta_action_space == "com_force":
-        # COM-force mode is currently supported for open-loop delta action tasks.
         if hasattr(joint_pos_cfg, "motion_command_name") and not hasattr(joint_pos_cfg, "external_action_buffer_name"):
             import whole_body_tracking.tasks.tracking.mdp as mdp
 
@@ -189,10 +188,41 @@ def _configure_delta_action_space(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg
                 f"clip={force_clip}, body='{force_body_name}'."
             )
             print("[INFO]: Disabled action-penalty rewards for COM-force mode.")
+        elif hasattr(joint_pos_cfg, "external_action_buffer_name"):
+            import whole_body_tracking.tasks.tracking.mdp as mdp
+
+            force_body_name = getattr(env_cfg.commands.motion, "anchor_body_name", "torso_link")
+            force_clip = args_cli.delta_com_force_clip if args_cli.delta_com_force_clip > 0.0 else None
+            com_force_cfg = mdp.ExternalDeltaComForceActionCfg(
+                asset_name=joint_pos_cfg.asset_name,
+                joint_names=joint_pos_cfg.joint_names,
+                use_default_offset=getattr(joint_pos_cfg, "use_default_offset", True),
+                motion_command_name=getattr(joint_pos_cfg, "motion_command_name", "motion"),
+                external_action_buffer_name=getattr(joint_pos_cfg, "external_action_buffer_name", "delta_external_actions"),
+                require_external_action=getattr(joint_pos_cfg, "require_external_action", True),
+                force_body_name=force_body_name,
+                force_scale=args_cli.delta_com_force_scale,
+                force_clip=force_clip,
+            )
+            if hasattr(joint_pos_cfg, "preserve_order"):
+                com_force_cfg.preserve_order = joint_pos_cfg.preserve_order
+            if hasattr(joint_pos_cfg, "scale"):
+                com_force_cfg.scale = joint_pos_cfg.scale
+            if hasattr(joint_pos_cfg, "offset"):
+                com_force_cfg.offset = joint_pos_cfg.offset
+            if hasattr(joint_pos_cfg, "clip"):
+                com_force_cfg.clip = joint_pos_cfg.clip
+            env_cfg.actions.joint_pos = com_force_cfg
+            print(
+                "[INFO]: Using COM-force delta action space for finetuning. "
+                "Base policy remains joint-space while the frozen delta policy outputs "
+                f"(Fx, Fy, Fz), scale={args_cli.delta_com_force_scale} N, "
+                f"clip={force_clip}, body='{force_body_name}'."
+            )
         else:
             print(
-                "[WARN]: `--delta_action_space com_force` is currently supported only for "
-                "open-loop delta-action tasks. "
+                "[WARN]: `--delta_action_space com_force` is supported only for "
+                "delta-action open-loop or finetune tasks with compatible action configs. "
                 "Keeping the existing action configuration."
             )
         return

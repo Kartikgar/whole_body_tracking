@@ -14,7 +14,7 @@ Delta-Action finetuning in this repo uses two policies at runtime:
 1. **Base policy** (trainable, updated by PPO during finetuning).
 2. **Delta policy** (frozen, loaded from an open-loop checkpoint).
 
-At each step, the environment receives:
+At each step, the environment receives one of two compositions:
 
 `combined_action = base_policy_action + external_delta_scale * frozen_delta_action`
 
@@ -25,6 +25,14 @@ Then the normal joint action post-processing applies:
 The composition is implemented by `ExternalDeltaJointPositionAction`:
 
 - `source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/delta_actions.py`
+
+When `--delta_action_space com_force` is used at the train/play launcher, a finetune-specific variant is used instead:
+
+1. `base_policy_action` stays in joint space.
+2. `frozen_delta_action` becomes a 3D COM force action.
+3. The action term applies the processed base joint target and the processed COM force in the same step.
+
+That variant is implemented by `ExternalDeltaComForceAction` in the same file.
 
 
 ## 2) Where Delta Finetuning Is Registered
@@ -240,6 +248,8 @@ So the recurrence is:
 
 This keeps an autoregressive policy-action channel while still using external delta buffer only for control composition.
 
+In COM-force finetune mode, the same observation/buffer flow is reused, but the external delta buffer holds `[Fx, Fy, Fz]` instead of joint deltas.
+
 
 ## 8) Training Entry-Point Wiring
 
@@ -317,8 +327,11 @@ At each step:
 
 1. Frozen delta policy predicts a correction from `delta_policy` obs.
 2. Base finetuned policy predicts its own action from standard `policy` obs.
-3. Env action term adds both actions before applying standard scaling/offset.
-4. PPO updates only the base policy; frozen delta policy stays fixed.
+3. Joint-delta finetune mode:
+   - env action term adds both actions before applying standard scaling/offset.
+4. COM-force finetune mode:
+   - env action term applies the base joint target normally and applies the frozen delta output as a COM force.
+5. PPO updates only the base policy; frozen delta policy stays fixed.
 
 
 ## 12) Key Files (Quick Index)

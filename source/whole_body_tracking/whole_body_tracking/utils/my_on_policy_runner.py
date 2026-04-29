@@ -230,6 +230,33 @@ class MotionOnPolicyRunner(OnPolicyRunner):
         if hasattr(self.env.unwrapped, self.delta_policy_base_action_buffer_name):
             delattr(self.env.unwrapped, self.delta_policy_base_action_buffer_name)
 
+    def _log_com_force_metrics(self, it: int):
+        if self.writer is None:
+            return
+        action_manager = getattr(self.env.unwrapped, "action_manager", None)
+        if action_manager is None:
+            return
+        try:
+            joint_pos_term = action_manager.get_term("joint_pos")
+        except Exception:
+            return
+        consume_stats = getattr(joint_pos_term, "consume_applied_force_log_stats", None)
+        if consume_stats is None:
+            return
+
+        force_stats = consume_stats()
+        if not force_stats:
+            return
+
+        self.writer.add_scalar("DeltaForce/applied_net", force_stats["applied_force_net"], it)
+        self.writer.add_scalar("DeltaForce/applied_x", force_stats["applied_force_x"], it)
+        self.writer.add_scalar("DeltaForce/applied_y", force_stats["applied_force_y"], it)
+        self.writer.add_scalar("DeltaForce/applied_z", force_stats["applied_force_z"], it)
+
+    def log(self, locs: dict, width: int = 80, pad: int = 35):
+        super().log(locs, width=width, pad=pad)
+        self._log_com_force_metrics(locs["it"])
+
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):  # noqa: C901
         if self.delta_policy is None:
             return super().learn(num_learning_iterations=num_learning_iterations, init_at_random_ep_len=init_at_random_ep_len)

@@ -173,6 +173,7 @@ class DeltaComForceAction(ActionTerm):
         # Debug-vis helpers for rendering COM-force arrows.
         self._force_arrow_x_axis = self._force_arrow_x_axis.to(device=self.device)
         self._force_arrow_fallback_axis = self._force_arrow_fallback_axis.to(device=self.device)
+        self._reset_force_log_stats()
 
     @property
     def action_dim(self) -> int:
@@ -185,6 +186,35 @@ class DeltaComForceAction(ActionTerm):
     @property
     def processed_actions(self) -> torch.Tensor:
         return self._processed_actions
+
+    def _reset_force_log_stats(self):
+        self._log_force_component_sum = torch.zeros(3, device=self.device, dtype=torch.float32)
+        self._log_force_norm_sum = torch.zeros(1, device=self.device, dtype=torch.float32)
+        self._log_force_sample_count = 0
+
+    def _accumulate_force_log_stats(self, applied_force_b: torch.Tensor):
+        force_b = applied_force_b.detach()
+        if force_b.ndim != 2 or force_b.shape[1] != 3:
+            raise RuntimeError(f"Expected applied COM force shape [N, 3], got {tuple(force_b.shape)}.")
+        self._log_force_component_sum += force_b.sum(dim=0)
+        self._log_force_norm_sum += torch.linalg.norm(force_b, dim=-1).sum().view(1)
+        self._log_force_sample_count += int(force_b.shape[0])
+
+    def consume_applied_force_log_stats(self) -> dict[str, float]:
+        if self._log_force_sample_count == 0:
+            return {}
+
+        denom = float(self._log_force_sample_count)
+        force_component_mean = (self._log_force_component_sum / denom).detach().cpu()
+        force_norm_mean = float((self._log_force_norm_sum / denom).item())
+        stats = {
+            "applied_force_net": force_norm_mean,
+            "applied_force_x": float(force_component_mean[0].item()),
+            "applied_force_y": float(force_component_mean[1].item()),
+            "applied_force_z": float(force_component_mean[2].item()),
+        }
+        self._reset_force_log_stats()
+        return stats
 
     def _parse_force_scale(self, force_scale: float | Sequence[float]) -> torch.Tensor:
         if isinstance(force_scale, (float, int)):
@@ -228,6 +258,7 @@ class DeltaComForceAction(ActionTerm):
 
         # Delta policy output controls COM force.
         self._processed_actions = self._raw_actions * self._force_scale
+        self._accumulate_force_log_stats(self._processed_actions)
 
         # Joint targets continue to replay motion action (open-loop baseline).
         if self._motion_command.has_joint_action:
@@ -340,8 +371,129 @@ class DeltaComForceAction(ActionTerm):
         self._force_visualizer.visualize(translations=marker_pos_w, orientations=orientations, scales=scales)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            self._raw_actions[:] = 0.0
+            self._processed_actions[:] = 0.0
+            return
         self._raw_actions[env_ids] = 0.0
         self._processed_actions[env_ids] = 0.0
+
+
+class ExternalDeltaComForceAction(DeltaComForceAction):
+    """Joint-position action with an externally provided COM force applied before each sim step."""
+
+    cfg: ExternalDeltaComForceActionCfg
+
+    def __init__(self, cfg: ExternalDeltaComForceActionCfg, env):
+        super().__init__(cfg, env)
+
+        # Finetuning policy keeps the standard joint-space action dimension.
+        self._raw_actions = torch.zeros(self.num_envs, self._num_joints, device=self.device)
+        self._processed_actions = torch.zeros_like(self._raw_actions)
+        self._processed_force_actions = torch.zeros(self.num_envs, 3, device=self.device)
+
+        if isinstance(self._joint_scale, (float, int)):
+            self._joint_scale = torch.full(
+                (self.num_envs, self._num_joints), float(self._joint_scale), dtype=torch.float32, device=self.device
+            )
+        self._scale = self._joint_scale
+
+    @property
+    def action_dim(self) -> int:
+        if hasattr(self, "_raw_actions"):
+            return int(self._raw_actions.shape[1])
+        return getattr(self, "_num_joints", 3)
+
+    def _get_external_force_action(self) -> torch.Tensor:
+        external_force_action = getattr(self._env, self.cfg.external_action_buffer_name, None)
+        if external_force_action is None:
+            if self.cfg.require_external_action:
+                raise RuntimeError(
+                    f"Expected external COM-force buffer '{self.cfg.external_action_buffer_name}' on the env."
+                )
+            return torch.zeros(self.num_envs, 3, device=self.device, dtype=self._processed_force_actions.dtype)
+
+        external_force_action = external_force_action.to(device=self.device, dtype=self._processed_force_actions.dtype)
+        if external_force_action.ndim != 2 or external_force_action.shape[0] != self.num_envs:
+            raise RuntimeError(
+                "External COM-force action shape mismatch: "
+                f"expected batch size {self.num_envs}, got {external_force_action.shape}."
+            )
+        if external_force_action.shape[1] != 3:
+            raise RuntimeError(
+                "External COM-force action shape mismatch: "
+                f"expected 3 force channels (Fx, Fy, Fz), got {external_force_action.shape[1]}."
+            )
+        return external_force_action
+
+    def process_actions(self, actions: torch.Tensor):
+        self._raw_actions[:] = actions
+
+        # Base finetuning policy still outputs joint actions.
+        self._processed_actions = self._raw_actions * self._joint_scale + self._offset
+        if self._joint_clip is not None:
+            self._processed_actions = torch.clamp(
+                self._processed_actions, min=self._joint_clip[:, :, 0], max=self._joint_clip[:, :, 1]
+            )
+
+        # Frozen delta policy output controls COM force.
+        external_force_action = self._get_external_force_action()
+        if self._force_clip_min is not None and self._force_clip_max is not None:
+            external_force_action = torch.clamp(
+                external_force_action, min=self._force_clip_min, max=self._force_clip_max
+            )
+        self._processed_force_actions = external_force_action * self._force_scale
+        self._accumulate_force_log_stats(self._processed_force_actions)
+
+    def apply_actions(self):
+        self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+
+        external_forces = self._processed_force_actions.view(self.num_envs, 1, 3)
+        self._asset.set_external_force_and_torque(
+            forces=external_forces,
+            torques=self._external_torques,
+            body_ids=self._force_body_ids,
+        )
+
+    def _debug_vis_callback(self, event):
+        del event
+        if self._force_visualizer is None or not self._asset.is_initialized:
+            return
+
+        body_pos_w = self._asset.data.body_pos_w[:, self._force_body_id]
+        body_quat_w = self._asset.data.body_quat_w[:, self._force_body_id]
+
+        force_w = quat_rotate(body_quat_w, self._processed_force_actions)
+        orientations = self._compute_force_arrow_orientation(force_w)
+
+        force_mag = torch.linalg.norm(self._processed_force_actions, dim=-1)
+        arrow_len = force_mag * self.cfg.force_debug_vis_length_scale
+        is_nonzero = force_mag > self.cfg.force_debug_vis_min_magnitude
+        arrow_len = torch.where(
+            is_nonzero,
+            arrow_len,
+            torch.full_like(arrow_len, self.cfg.force_debug_vis_hidden_arrow_length),
+        )
+        arrow_thickness = torch.full_like(arrow_len, self.cfg.force_debug_vis_thickness)
+        scales = torch.stack((arrow_len, arrow_thickness, arrow_thickness), dim=-1)
+
+        force_dir_w = torch.where(
+            force_mag.unsqueeze(-1) > self.cfg.force_debug_vis_min_magnitude,
+            force_w / force_mag.unsqueeze(-1).clamp_min(1.0e-9),
+            torch.zeros_like(force_w),
+        )
+        marker_pos_w = body_pos_w + 0.5 * arrow_len.unsqueeze(-1) * force_dir_w
+        self._force_visualizer.visualize(translations=marker_pos_w, orientations=orientations, scales=scales)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            self._raw_actions[:] = 0.0
+            self._processed_actions[:] = 0.0
+            self._processed_force_actions[:] = 0.0
+            return
+        self._raw_actions[env_ids] = 0.0
+        self._processed_actions[env_ids] = 0.0
+        self._processed_force_actions[env_ids] = 0.0
 
 
 class ExternalDeltaJointPositionAction(JointPositionAction):
@@ -451,6 +603,16 @@ class DeltaComForceActionCfg(JointPositionActionCfg):
     force_debug_vis_min_arrow_length: float = 0.05
     force_debug_vis_max_arrow_length: float = 5.0
     force_debug_vis_hidden_arrow_length: float = 1.0e-4
+
+
+@configclass
+class ExternalDeltaComForceActionCfg(DeltaComForceActionCfg):
+    """Config for finetuning with joint-space base actions and external COM-force delta actions."""
+
+    class_type: type[ActionTerm] = ExternalDeltaComForceAction
+
+    external_action_buffer_name: str = "delta_external_actions"
+    require_external_action: bool = True
 
 
 @configclass
