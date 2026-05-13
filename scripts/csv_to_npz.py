@@ -298,17 +298,17 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
             ):
                 log[k] = np.stack(log[k], axis=0)
 
-            np.savez("/tmp/motion.npz", **log)
+            np.savez(f"{args_cli.input_file.split('.')[0]}.npz", **log)
 
             import wandb
 
-            COLLECTION = args_cli.output_name
-            run = wandb.init(project="csv_to_npz", name=COLLECTION)
-            print(f"[INFO]: Logging motion to wandb: {COLLECTION}")
-            REGISTRY = "motions"
-            logged_artifact = run.log_artifact(artifact_or_path="/tmp/motion.npz", name=COLLECTION, type=REGISTRY)
-            run.link_artifact(artifact=logged_artifact, target_path=f"wandb-registry-{REGISTRY}/{COLLECTION}")
-            print(f"[INFO]: Motion saved to wandb registry: {REGISTRY}/{COLLECTION}")
+            # COLLECTION = args_cli.output_name
+            # run = wandb.init(project="csv_to_npz", name=COLLECTION)
+            # print(f"[INFO]: Logging motion to wandb: {COLLECTION}")
+            # REGISTRY = "motions"
+            # logged_artifact = run.log_artifact(artifact_or_path="/tmp/motion.npz", name=COLLECTION, type=REGISTRY)
+            # run.link_artifact(artifact=logged_artifact, target_path=f"wandb-registry-{REGISTRY}/{COLLECTION}")
+            # print(f"[INFO]: Motion saved to wandb registry: {REGISTRY}/{COLLECTION}")
 
 
 def main():

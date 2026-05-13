@@ -9,6 +9,9 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import os
+from dataclasses import replace
+
 import numpy as np
 import torch
 
@@ -16,7 +19,8 @@ from isaaclab.app import AppLauncher
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Replay converted motions.")
-parser.add_argument("--registry_name", type=str, required=True, help="The name of the wand registry.")
+parser.add_argument("--registry_name", type=str, default=None, help="The name of the wandb registry artifact.")
+parser.add_argument("--motion_file", type=str, default=None, help="Path to a local motion .npz file.")
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -40,7 +44,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 # Pre-defined configs
 ##
 from whole_body_tracking.robots.g1 import G1_CYLINDER_CFG
-from whole_body_tracking.tasks.tracking.mdp import MotionLoader
+from whole_body_tracking.tasks.tracking.mdp.commands import MotionLoader
 
 
 @configclass
@@ -67,22 +71,32 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
     # Define simulation stepping
     sim_dt = sim.get_physics_dt()
 
-    registry_name = args_cli.registry_name
-    if ":" not in registry_name:  # Check if the registry name includes alias, if not, append ":latest"
-        registry_name += ":latest"
-    import pathlib
+    if args_cli.motion_file is not None:
+        motion_file = os.path.abspath(os.path.expanduser(args_cli.motion_file))
+        if not os.path.isfile(motion_file):
+            raise FileNotFoundError(f"Motion file not found: {motion_file}")
+        print(f"[INFO]: Using local motion file: {motion_file}")
+    else:
+        if args_cli.registry_name is None:
+            raise ValueError("Provide --motion_file, or provide --registry_name to fetch motion.npz from wandb.")
+        registry_name = args_cli.registry_name
+        if ":" not in registry_name:  # Check if the registry name includes alias, if not, append ":latest"
+            registry_name += ":latest"
+        import pathlib
 
-    import wandb
+        import wandb
 
-    api = wandb.Api()
-    artifact = api.artifact(registry_name)
-    motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
+        print(f"[INFO]: Downloading motion artifact from wandb: {registry_name}")
+        api = wandb.Api()
+        artifact = api.artifact(registry_name)
+        motion_file = str(pathlib.Path(artifact.download()) / "motion.npz")
 
     motion = MotionLoader(
         motion_file,
-        torch.tensor([0], dtype=torch.long, device=sim.device),
+        [0],
         sim.device,
     )
+    trajectory_ids = torch.zeros(scene.num_envs, dtype=torch.long, device=sim.device)
     time_steps = torch.zeros(scene.num_envs, dtype=torch.long, device=sim.device)
 
     # Simulation loop
@@ -92,19 +106,24 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
         time_steps[reset_ids] = 0
 
         root_states = robot.data.default_root_state.clone()
-        root_states[:, :3] = motion.body_pos_w[time_steps][:, 0] + scene.env_origins[:, None, :]
-        root_states[:, 3:7] = motion.body_quat_w[time_steps][:, 0]
-        root_states[:, 7:10] = motion.body_lin_vel_w[time_steps][:, 0]
-        root_states[:, 10:] = motion.body_ang_vel_w[time_steps][:, 0]
+        root_states[:, :3] = motion.get_body_pos_w(trajectory_ids, time_steps)[:, 0] + scene.env_origins
+        root_states[:, 3:7] = motion.get_body_quat_w(trajectory_ids, time_steps)[:, 0]
+        root_states[:, 7:10] = motion.get_body_lin_vel_w(trajectory_ids, time_steps)[:, 0]
+        root_states[:, 10:] = motion.get_body_ang_vel_w(trajectory_ids, time_steps)[:, 0]
 
         robot.write_root_state_to_sim(root_states)
-        robot.write_joint_state_to_sim(motion.joint_pos[time_steps], motion.joint_vel[time_steps])
+        robot.write_joint_state_to_sim(
+            motion.get_joint_pos(trajectory_ids, time_steps),
+            motion.get_joint_vel(trajectory_ids, time_steps),
+        )
         scene.write_data_to_sim()
         sim.render()  # We don't want physic (sim.step())
         scene.update(sim_dt)
 
         pos_lookat = root_states[0, :3].cpu().numpy()
-        sim.set_camera_view(pos_lookat + np.array([2.0, 2.0, 0.5]), pos_lookat)
+        eye = (float(pos_lookat[0] + 2.0), float(pos_lookat[1] + 2.0), float(pos_lookat[2] + 0.5))
+        target = (float(pos_lookat[0]), float(pos_lookat[1]), float(pos_lookat[2]))
+        sim.set_camera_view(eye, target)
 
 
 def main():
