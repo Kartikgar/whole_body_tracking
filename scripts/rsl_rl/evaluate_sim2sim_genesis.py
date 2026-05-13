@@ -616,11 +616,13 @@ class Sim2SimEvaluatorGenesis:
         # Rollout horizon is the remaining reference motion from start_timestep to end.
         self.max_steps = self.reference_motion_length_steps - self.start_timestep
         if max_steps is not None and int(max_steps) != self.max_steps:
-            print(
-                f"[WARN] Ignoring --max_steps={int(max_steps)}; using policy reference window "
-                f"from start_timestep={self.start_timestep} with "
-                f"{self.max_steps} steps."
-            )
+            # print(
+            #     f"[WARN] Ignoring --max_steps={int(max_steps)}; using policy reference window "
+            #     f"from start_timestep={self.start_timestep} with "
+            #     f"{self.max_steps} steps."
+            # )
+            self.max_steps = int(max_steps)
+            print(f"max_steps: {self.max_steps}")
         # Genesis init
         gs_backend = gs.gpu if backend == "gpu" else gs.cpu
         gs.init(backend=gs_backend, precision="32", logging_level="warning")
@@ -1361,7 +1363,7 @@ class Sim2SimEvaluatorGenesis:
 
         return False, "completed"
 
-    def _tracking_metrics(self, state: dict[str, np.ndarray], ref: dict[str, np.ndarray]) -> dict[str, float]:
+    def _tracking_metrics(self, state: dict[str, np.ndarray], ref: dict[str, np.ndarray]) -> dict[str, float | str]:
         robot_anchor_pos = state["body_pos_w"][self.anchor_idx]
         robot_anchor_quat = state["body_quat_w"][self.anchor_idx]
         ref_anchor_pos = ref["body_pos_w"][self.anchor_idx]
@@ -1439,18 +1441,36 @@ class Sim2SimEvaluatorGenesis:
         target_for_npz = self.target_trajectories if record_motion_enabled else 0
         traj_pbar = None
         metrics_pbar = None
+        step_pbar = None
+        target_rollouts = max(target_for_npz, metric_target_envs)
+        estimated_rollouts = (target_rollouts + self.num_envs - 1) // self.num_envs if target_rollouts > 0 else 0
         if record_motion_enabled and target_for_npz > 0:
             if tqdm is not None:
-                traj_pbar = tqdm(total=target_for_npz, desc="Collect trajectories", unit="traj", leave=True)
+                traj_pbar = tqdm(
+                    total=target_for_npz, desc="Collect trajectories", unit="traj", leave=True, dynamic_ncols=True
+                )
             else:
                 print(f"[INFO] Collecting trajectories: 0/{target_for_npz}")
         if metrics_enabled and metric_target_envs > 0:
             if tqdm is not None:
-                metrics_pbar = tqdm(total=metric_target_envs, desc="Compute metrics", unit="env", leave=True)
+                metrics_pbar = tqdm(
+                    total=metric_target_envs, desc="Compute metrics", unit="env", leave=True, dynamic_ncols=True
+                )
             else:
                 print(f"[INFO] Computing metrics: 0/{metric_target_envs}")
+        if tqdm is not None:
+            step_total = estimated_rollouts * self.max_steps if estimated_rollouts > 0 else None
+            step_pbar = tqdm(
+                total=step_total,
+                desc="Simulate rollouts",
+                unit="step",
+                leave=True,
+                dynamic_ncols=True,
+                mininterval=0.5,
+            )
 
         while True:
+            active_rollout_index = rollout_count + 1
             ref0_batch = self._fetch_reference_batch(self.start_timestep, batch_size=self.num_envs)
             ref0 = self._ref_for_env(ref0_batch, env_id=0)
             self._reset_robot_to_reference(ref0)
@@ -1513,6 +1533,22 @@ class Sim2SimEvaluatorGenesis:
                 self.last_action = action_batch.copy()
                 total_steps += 1
                 steps_this_rollout += 1
+                if step_pbar is not None:
+                    step_pbar.update(1)
+                    if (
+                        t_step == 0
+                        or (t_step + 1) % 10 == 0
+                        or (not metrics_enabled and terminated)
+                        or (metrics_enabled and bool(np.all(env_done)))
+                        or t_step + 1 >= self.max_steps
+                    ):
+                        step_pbar.set_postfix(
+                            rollout=active_rollout_index,
+                            rollout_step=f"{t_step + 1}/{self.max_steps}",
+                            traj_saved=len(collected_trajectories),
+                            done_envs=int(env_done.sum()),
+                            refresh=False,
+                        )
 
                 if self.cam is not None:
                     root_pos = state["body_pos_w"][self.root_idx]
@@ -1590,6 +1626,14 @@ class Sim2SimEvaluatorGenesis:
                     else:
                         shown = min(len(collected_trajectories), target_for_npz)
                         print(f"[INFO] Collecting trajectories: {shown}/{target_for_npz}")
+            if step_pbar is not None:
+                step_pbar.set_postfix(
+                    rollout=rollout_count,
+                    rollout_step=f"{steps_this_rollout}/{self.max_steps}",
+                    traj_saved=len(collected_trajectories),
+                    done_envs=int(env_done.sum()),
+                    refresh=False,
+                )
 
             if metrics_enabled and metric_envs_done >= metric_target_envs:
                 break
@@ -1603,6 +1647,8 @@ class Sim2SimEvaluatorGenesis:
         if self.cam is not None:
             filename = video_name or "genesis_eval.mp4"
             self.cam.stop_recording(save_to_filename=filename, fps=round(1.0 / self.control_dt))
+        if step_pbar is not None:
+            step_pbar.close()
         if traj_pbar is not None:
             traj_pbar.close()
         if metrics_pbar is not None:
