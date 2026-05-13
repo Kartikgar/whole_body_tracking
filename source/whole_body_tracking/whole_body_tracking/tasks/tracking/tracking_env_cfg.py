@@ -58,7 +58,7 @@ class MySceneCfg(InteractiveSceneCfg):
         ),
     )
     # robots
-    robot: ArticulationCfg = MISSING
+    robot: ArticulationCfg = MISSING  # pyright: ignore[reportAssignmentType]
     # lights
     light = AssetBaseCfg(
         prim_path="/World/light",

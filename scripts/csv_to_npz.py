@@ -164,7 +164,7 @@ class MotionLoader:
         index_0 = (phase * (self.input_frames - 1)).floor().long()
         index_1 = torch.minimum(index_0 + 1, torch.tensor(self.input_frames - 1))
         blend = phase * (self.input_frames - 1) - index_0
-        return index_0, index_1, blend
+        return index_0, index_1, blend  # pyright: ignore[reportReturnType]
 
     def _compute_velocities(self):
         """Computes the velocities of the motion."""
@@ -212,7 +212,7 @@ class MotionLoader:
         if self.current_idx >= self.output_frames:
             self.current_idx = 0
             reset_flag = True
-        return state, reset_flag
+        return state, reset_flag  # pyright: ignore[reportReturnType]
 
 
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joint_names: list[str]):
@@ -245,7 +245,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, joi
 
     # Simulation loop
     while simulation_app.is_running():
-        (
+        (  # pyright: ignore[reportAssignmentType]
             (
                 motion_base_pos,
                 motion_base_rot,
