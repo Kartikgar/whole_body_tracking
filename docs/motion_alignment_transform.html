@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Motion command alignment: re-rooting and re-yawing</title>
+  <style>
+    :root {
+      --bg: #fafbfc;
+      --text: #1f2328;
+      --muted: #57606a;
+      --accent: #0969da;
+      --code-bg: #f6f8fa;
+      --border: #d0d7de;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      line-height: 1.65;
+      max-width: 46rem;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 4rem;
+      background: var(--bg);
+      color: var(--text);
+    }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 600;
+      line-height: 1.25;
+      margin-bottom: 0.5rem;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.95rem;
+      margin-bottom: 2rem;
+    }
+    h2 {
+      font-size: 1.25rem;
+      margin-top: 2.25rem;
+      padding-bottom: 0.35rem;
+      border-bottom: 1px solid var(--border);
+    }
+    h3 {
+      font-size: 1.05rem;
+      margin-top: 1.5rem;
+    }
+    p { margin: 0.85rem 0; }
+    .muted { color: var(--muted); }
+    code, pre {
+      font-family: ui-monospace, "Cascadia Code", monospace;
+      font-size: 0.88em;
+    }
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem 1.1rem;
+      overflow-x: auto;
+      line-height: 1.45;
+    }
+    .formula {
+      background: var(--code-bg);
+      border-left: 3px solid var(--accent);
+      padding: 0.75rem 1rem;
+      margin: 1rem 0;
+      border-radius: 0 6px 6px 0;
+    }
+    ul { padding-left: 1.35rem; }
+    li { margin: 0.4rem 0; }
+    .diagram {
+      background: var(--code-bg);
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin: 1.25rem 0;
+      font-family: ui-monospace, monospace;
+      font-size: 0.82rem;
+      line-height: 1.4;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    a { color: var(--accent); }
+    footer {
+      margin-top: 3rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+
+<h1>Motion command alignment</h1>
+<p class="subtitle">Intuition for re-rooting and re-yawing in <code>MotionCommand._update_command</code>
+  (<code>body_pos_relative_w</code>, <code>body_quat_relative_w</code>).</p>
+
+<h2>The problem</h2>
+<p>
+  The dataset gives you one articulated pose per timestep: joint angles and rigid-body poses for a skeleton.
+  Those poses live in whatever <strong>world frame</strong> the exporter used (often a moving origin that follows the character in the recording).
+</p>
+<p>
+  In simulation, your robot sits on a tiled floor at some map location and may slowly drift sideways or yaw under control noise, disturbances, or an open-loop policy.
+  If you asked the policy &ldquo;match every body to the NPZ literal world XYZ every frame,&rdquo; small root drift would look like catastrophic whole-body pose error—even when the limbs still match the demonstration <em>relative to</em> the character.
+</p>
+<p class="muted">
+  So we split concerns: anchor terms penalize gross root mismatch explicitly; articulated matching uses a transformed copy of the reference that rides on today&rsquo;s root alignment.
+</p>
+
+<h2>What we want intuitively</h2>
+<ul>
+  <li><strong>Same shape as the clip</strong> — Preserve the kinematic pose relative to the demonstration root (bone layout).</li>
+  <li><strong>Couple XY to the simulated root</strong> — Keep horizontal placement tied to where the robot actually is so drifting does not inflate limb errors artificially.</li>
+  <li><strong>Preserve clip height semantics on Z</strong> — Vertical component of the new origin tracks the NPZ anchor height (hybrid).</li>
+  <li><strong>Match heading in yaw only</strong> — Rotate the whole reference skeleton horizontally so demonstrations recorded facing &ldquo;north&rdquo; line up when the simulation faces northeast, without baking tilt from a bent torso into &ldquo;heading.&rdquo;</li>
+</ul>
+
+<h2>Rigid-body picture</h2>
+<p>Treat each timestep like a rigid constellation of rigid bodies—the motion skeleton—then apply <strong>one</strong> world transform (ΔR, <strong>t</strong>):</p>
+<div class="formula">
+<strong>Rotation (ΔR).</strong>
+&nbsp; quaternion product: ΔR = (robot yaw about world&nbsp;↑)
+× inverse(clip yaw about world&nbsp;↑)<br/><br/>
+<strong>Translation hybrid (vector t).</strong>
+&nbsp;
+<strong>t</strong> = (<em>x<sub>robot</sub></em>, <em>y<sub>robot</sub></em>, <em>z<sub>clip&nbsp;anchor</sub></em>)<br/><br/>
+<strong>positions</strong> &nbsp;
+<strong>p′</strong><sub>i</sub>
+= <strong>t</strong> + ΔR · (<strong>p</strong><sup>clip</sup><sub>i</sub>
+− <strong>p</strong><sup>clip</sup><sub>anchor</sub>)<br/><br/>
+<strong>orientations</strong> &nbsp;
+<strong>R′</strong><sub>i</sub>
+= ΔR · <strong>R</strong><sup>clip</sup><sub>i</sub>
+</div>
+<p>
+  That is literally &ldquo;express every NPZ body relative to the clip anchor in world axes, rotate by heading delta, translate so the synthetic root sits at <strong>t</strong>&rdquo;—nothing per-link fancier than that.
+</p>
+
+<h3>Diagram (top-down, yaw)</h3>
+<div class="diagram">         Recording world                After re-yaw
+      (NPZ headings)               (ΔR aligns clip → sim yaw)
+
+           N                              N
+           ↑                              ↑
+
+    ref heading ──►              robot heading ──►
+    (pelvis yaw)                  (pelvis yaw)
+
+    Skeleton limbs keep their      Same limb offsets,
+    layout vs ref anchor           but whole pattern
+                                   rotated until ref
+                                   and sim headings
+                                   coincide in yaw.
+
+
+  ΔR = &quot;snap clip horizontal facing to robot horizontal facing&quot;
+       (applied to all bodies at once).</div>
+
+<h3>Diagram (vertical hybrid for <strong>t</strong>)</h3>
+<div class="diagram">  Plan view (XY)                    Side view idea (Z)
+
+  Clip anchor XY can differ           z_clip ← height from NPZ anchor
+       from robot;                      │
+  we IGNORE clip XY for t_xy:           ●──── target origin z
+                                       │
+  ● robot anchor XY  ──────────────────┘
+       │
+       └── t_xy follows robot anchor
+           so horizontal targets follow the simulated root.</div>
+
+<h2>Name map to code</h2>
+<pre><code># commands.py — MotionCommand._update_command
+
+delta_pos_w           →  t replicated per-body for tensors only
+delta_ori_w           →  ΔR (same for all bodies)
+body_pos_relative_w   →  p′ᵢ in world. Still Cartesian world;
+                           "_relative" ≠ link-local; means aligned clip pose.
+body_quat_relative_w  →  R′ᵢ as world quaternion
+
+anchor_pos_w          →  raw NPZ anchor (goal anchor in debug viz)
+robot_anchor_pos_w    →  simulated anchor body pose</code></pre>
+
+<h2>Why debug visuals can confuse</h2>
+<p>
+  Body goal markers often plot <code>body_pos_relative_w</code> (&ldquo;aligned&rdquo; targets), while the anchor goal marker plots raw <code>anchor_pos_w</code>.
+  If the simulated root slips away from the literal NPZ root, the anchor spheres separate—the body frames can still hug the limbs because alignment explicitly uses the robot XY and yaw every step.
+</p>
+
+<h2>Why headings use a designated body</h2>
+<p>
+  Yaw from <code>anchor_body_name</code> (often torso) mixes pitch when the torso leans forward.
+  The code prefers <code>relative_heading_body_name</code> (defaulting to pelvis/root) stripped to <code>yaw_quat</code>: pure azimuth about world up, stabler horizontal alignment.
+</p>
+
+<h2>Takeaway</h2>
+<p>
+  Re-rooting and re-yawing are not tricks to confuse the reward—they are how you define a consistent <strong>tutorial frame</strong> for the articulated reference:
+  horizontal root follows the simulator, clip height informs vertical origin, headings match in yaw, and the articulated pose from the NPZ arrives as plausible Cartesian targets (<code>*_relative_w</code>) you can subtract from simulated body world positions.
+</p>
+
+<footer>
+  Companion to <code>whole_body_tracking/.../mdp/commands.py</code>
+  (<code>_update_command</code>). Rendering is static HTML only.
+</footer>
+
+</body>
+</html>
