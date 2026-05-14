@@ -61,12 +61,24 @@ known_local_folder = "config"
 
 [tool.pyright]
 
+include = [
+    "scripts",
+    "source/whole_body_tracking",
+]
+
 exclude = [
     "**/__pycache__",
     "**/docs",
     "**/logs",
     ".git",
     ".vscode",
+]
+
+extraPaths = [
+    "source/whole_body_tracking",
+    "../IsaacLab/source/isaaclab",
+    "../IsaacLab/source/isaaclab_rl",
+    "../IsaacLab/source/isaaclab_tasks",
 ]
 
 typeCheckingMode = "basic"
@@ -82,4 +94,37 @@ reportMissingModuleSource = "none" # -> most common: prettytable in mdp managers
 
 reportGeneralTypeIssues = "none"       # -> raises 218 errors (usage of literal MISSING in dataclasses)
 reportOptionalMemberAccess = "warning" # -> raises 8 errors
+reportPrivateUsage = "warning"
+
+[tool.basedpyright]
+
+include = [
+    "scripts",
+    "source/whole_body_tracking",
+]
+
+exclude = [
+    "**/__pycache__",
+    "**/docs",
+    "**/logs",
+    ".git",
+    ".vscode",
+]
+
+extraPaths = [
+    "source/whole_body_tracking",
+    "../IsaacLab/source/isaaclab",
+    "../IsaacLab/source/isaaclab_rl",
+    "../IsaacLab/source/isaaclab_tasks",
+]
+
+typeCheckingMode = "basic"
+pythonVersion = "3.10"
+pythonPlatform = "Linux"
+enableTypeIgnoreComments = true
+
+reportMissingImports = "none"
+reportMissingModuleSource = "none"
+reportGeneralTypeIssues = "none"
+reportOptionalMemberAccess = "warning"
 reportPrivateUsage = "warning"
