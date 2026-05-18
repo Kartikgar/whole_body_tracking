@@ -45,19 +45,16 @@ class MotionLoader:
             else torch.tensor(body_indexes, dtype=torch.long, device=self.device)
         )
 
-        motion_entries, fps_values = self._load_motion_entries(motion_file)
-        self._trajectory_data = [self._to_trajectory_tensors(motion) for motion in motion_entries]
-        self.num_trajectories = len(self._trajectory_data)
-        if self.num_trajectories == 0:
-            raise ValueError(f"Motion file '{motion_file}' did not contain any trajectories.")
+        with np.load(motion_file, allow_pickle=True) as data:
+            if "joint_pos" in data.files:
+                self._load_stacked_motion(data, motion_file)
+            else:
+                motion_entries, fps_values = self._load_motion_entries_from_data(data)
+                self._load_motion_entries_as_flat_buffers(motion_entries, fps_values, motion_file)
 
-        self.trajectory_time_step_total = torch.tensor(
-            [entry["joint_pos"].shape[0] for entry in self._trajectory_data], dtype=torch.long, device=self.device
-        )
-        if torch.any(self.trajectory_time_step_total <= 0):
-            raise ValueError(f"All trajectories in '{motion_file}' must have at least one frame.")
         self.time_step_total = int(self.trajectory_time_step_total.max().item())
 
+    def _set_fps(self, fps_values: list[float], motion_file: str):
         if len(fps_values) == 0:
             self.fps = torch.zeros(self.num_trajectories, dtype=torch.float32, device=self.device)
         elif len(fps_values) == 1 and self.num_trajectories > 1:
@@ -72,8 +69,119 @@ class MotionLoader:
                 f"{self.num_trajectories} trajectories."
             )
 
-        self.has_joint_action = any("joint_action" in entry for entry in self._trajectory_data)
-        self._build_flat_buffers()
+    def _set_trajectory_lengths(self, trajectory_lengths: Sequence[int], motion_file: str):
+        self.num_trajectories = len(trajectory_lengths)
+        if self.num_trajectories == 0:
+            raise ValueError(f"Motion file '{motion_file}' did not contain any trajectories.")
+
+        self.trajectory_time_step_total = torch.tensor(trajectory_lengths, dtype=torch.long, device=self.device)
+        if torch.any(self.trajectory_time_step_total <= 0):
+            raise ValueError(f"All trajectories in '{motion_file}' must have at least one frame.")
+
+        offsets = [0]
+        for length in self.trajectory_time_step_total[:-1].tolist():
+            offsets.append(offsets[-1] + int(length))
+        self.trajectory_start_time_step = torch.tensor(offsets, dtype=torch.long, device=self.device)
+
+    @staticmethod
+    def _as_float32_array(value: np.ndarray) -> np.ndarray:
+        return np.asarray(value, dtype=np.float32)
+
+    @classmethod
+    def _normalize_stacked_vector_array(cls, key: str, value: np.ndarray) -> np.ndarray:
+        arr = cls._as_float32_array(value)
+        if arr.ndim == 2:
+            arr = arr[None, ...]
+        if arr.ndim != 3:
+            raise ValueError(f"Expected `{key}` shape [T, D] or [N_traj, T, D], got {arr.shape}.")
+        return arr
+
+    @classmethod
+    def _normalize_stacked_body_array(cls, key: str, value: np.ndarray, expected_tail_dim: int) -> np.ndarray:
+        arr = cls._as_float32_array(value)
+        if arr.ndim == 3:
+            arr = arr[None, ...]
+        if arr.ndim != 4 or arr.shape[-1] != expected_tail_dim:
+            raise ValueError(
+                f"Expected `{key}` shape [T, B, {expected_tail_dim}] or [N_traj, T, B, {expected_tail_dim}], "
+                f"got {arr.shape}."
+            )
+        return arr
+
+    def _motion_body_indexes_for_count(self, num_motion_bodies: int) -> np.ndarray:
+        if num_motion_bodies == int(self._body_indexes.numel()):
+            return np.arange(num_motion_bodies, dtype=np.int64)
+
+        body_indexes = self._body_indexes.detach().to(device="cpu", dtype=torch.long).numpy()
+        max_body_index = int(body_indexes.max()) if body_indexes.size > 0 else -1
+        if max_body_index >= num_motion_bodies:
+            raise ValueError(
+                f"Motion body count mismatch. Requested body index {max_body_index}, but motion has only "
+                f"{num_motion_bodies} bodies."
+            )
+        return body_indexes
+
+    def _to_device_tensor(self, arr: np.ndarray) -> torch.Tensor:
+        return torch.tensor(np.ascontiguousarray(arr), dtype=torch.float32, device=self.device)
+
+    def _load_stacked_motion(self, data: np.lib.npyio.NpzFile, motion_file: str):
+        joint_pos = self._normalize_stacked_vector_array("joint_pos", data["joint_pos"])
+        num_trajectories, time_steps, joint_dim = map(int, joint_pos.shape)
+        self._set_trajectory_lengths([time_steps] * num_trajectories, motion_file)
+        self._set_fps(self._extract_fps_values_from_stacked(data, num_trajectories), motion_file)
+        self.joint_pos = self._to_device_tensor(joint_pos.reshape(-1, joint_dim))
+        del joint_pos
+
+        joint_vel = self._normalize_stacked_vector_array("joint_vel", data["joint_vel"])
+        if tuple(joint_vel.shape) != (num_trajectories, time_steps, joint_dim):
+            raise ValueError(
+                f"`joint_vel` shape {joint_vel.shape} must match `joint_pos` shape "
+                f"({num_trajectories}, {time_steps}, {joint_dim})."
+            )
+        self.joint_vel = self._to_device_tensor(joint_vel.reshape(-1, joint_dim))
+        del joint_vel
+
+        self._body_pos_w = self._load_stacked_body_tensor(data, "body_pos_w", (num_trajectories, time_steps), 3)
+        self._body_quat_w = self._load_stacked_body_tensor(data, "body_quat_w", (num_trajectories, time_steps), 4)
+        self._body_lin_vel_w = self._load_stacked_body_tensor(
+            data, "body_lin_vel_w", (num_trajectories, time_steps), 3
+        )
+        self._body_ang_vel_w = self._load_stacked_body_tensor(
+            data, "body_ang_vel_w", (num_trajectories, time_steps), 3
+        )
+
+        action_key = next((key for key in self._ACTION_TRAJ_KEYS if key in data.files), None)
+        self.has_joint_action = action_key is not None
+        if action_key is None:
+            self.joint_action = torch.zeros_like(self.joint_pos)
+            return
+
+        action = self._normalize_stacked_vector_array(action_key, data[action_key])
+        if tuple(action.shape) != (num_trajectories, time_steps, joint_dim):
+            raise ValueError(
+                f"`{action_key}` shape {action.shape} must match `joint_pos` shape "
+                f"({num_trajectories}, {time_steps}, {joint_dim})."
+            )
+        self.joint_action = self._to_device_tensor(action.reshape(-1, joint_dim))
+
+    def _load_stacked_body_tensor(
+        self,
+        data: np.lib.npyio.NpzFile,
+        key: str,
+        expected_shape: tuple[int, int],
+        expected_tail_dim: int,
+    ) -> torch.Tensor:
+        arr = self._normalize_stacked_body_array(key, data[key], expected_tail_dim=expected_tail_dim)
+        num_trajectories, time_steps = expected_shape
+        if tuple(arr.shape[:2]) != expected_shape:
+            raise ValueError(
+                f"`{key}` has leading shape {arr.shape[:2]}, expected ({num_trajectories}, {time_steps})."
+            )
+        motion_body_indexes = self._motion_body_indexes_for_count(int(arr.shape[2]))
+        arr = arr[:, :, motion_body_indexes, :]
+        return self._to_device_tensor(
+            arr.reshape(num_trajectories * time_steps, len(motion_body_indexes), expected_tail_dim)
+        )
 
     def _build_flat_buffers(self):
         offsets = [0]
@@ -252,14 +360,17 @@ class MotionLoader:
                 num_trajectories = cls._infer_num_trajectories_from_stacked(data)
                 fps_values = cls._extract_fps_values_from_stacked(data, num_trajectories)
                 entries = []
+                # Compatibility path for callers that still want per-trajectory numpy dictionaries.
+                # MotionLoader itself uses _load_stacked_motion() to avoid repeatedly materializing large arrays.
+                stacked_arrays = {
+                    key: np.asarray(data[key]) for key in cls._REQUIRED_KEYS + cls._ACTION_TRAJ_KEYS if key in data.files
+                }
                 for trajectory_idx in range(num_trajectories):
                     motion = {}
-                    for key in cls._REQUIRED_KEYS + cls._ACTION_TRAJ_KEYS:
-                        if key not in data.files:
-                            continue
+                    for key, arr in stacked_arrays.items():
                         selected = cls._select_stacked_trajectory_array(
                             key=key,
-                            arr=np.asarray(data[key]),
+                            arr=arr,
                             num_trajectories=num_trajectories,
                             trajectory_idx=trajectory_idx,
                         )
@@ -269,20 +380,56 @@ class MotionLoader:
                     entries.append(motion)
                 return entries, fps_values
 
-            motion_keys = cls._resolve_motion_keys(data)
-            entries = []
-            fps_values = []
-            top_level_fps = float(np.asarray(data["fps"]).reshape(-1)[0]) if "fps" in data.files else None
-            for motion_key in motion_keys:
-                motion_dict = cls._extract_motion_dict(motion_key, data[motion_key])
-                motion = {key: np.asarray(value) for key, value in motion_dict.items()}
-                cls._validate_motion_dict(motion, source_key=motion_key)
-                entries.append(motion)
-                if "fps" in motion:
-                    fps_values.append(float(np.asarray(motion["fps"]).reshape(-1)[0]))
-                elif top_level_fps is not None:
-                    fps_values.append(top_level_fps)
-            return entries, fps_values
+            return cls._load_motion_entries_from_data(data)
+
+    @classmethod
+    def _load_motion_entries_from_data(cls, data: np.lib.npyio.NpzFile) -> tuple[list[dict[str, np.ndarray]], list[float]]:
+        motion_keys = cls._resolve_motion_keys(data)
+        entries = []
+        fps_values = []
+        top_level_fps = float(np.asarray(data["fps"]).reshape(-1)[0]) if "fps" in data.files else None
+        for motion_key in motion_keys:
+            motion_dict = cls._extract_motion_dict(motion_key, data[motion_key])
+            motion = {key: np.asarray(value) for key, value in motion_dict.items()}
+            cls._validate_motion_dict(motion, source_key=motion_key)
+            entries.append(motion)
+            if "fps" in motion:
+                fps_values.append(float(np.asarray(motion["fps"]).reshape(-1)[0]))
+            elif top_level_fps is not None:
+                fps_values.append(top_level_fps)
+        return entries, fps_values
+
+    def _load_motion_entries_as_flat_buffers(
+        self, motion_entries: list[dict[str, np.ndarray]], fps_values: list[float], motion_file: str
+    ):
+        trajectory_data = [self._to_trajectory_tensors(motion) for motion in motion_entries]
+        self._set_trajectory_lengths([int(entry["joint_pos"].shape[0]) for entry in trajectory_data], motion_file)
+        self._set_fps(fps_values, motion_file)
+
+        self.joint_pos = torch.cat([entry["joint_pos"] for entry in trajectory_data], dim=0)
+        self.joint_vel = torch.cat([entry["joint_vel"] for entry in trajectory_data], dim=0)
+        self._body_pos_w = torch.cat([entry["body_pos_w"] for entry in trajectory_data], dim=0)
+        self._body_quat_w = torch.cat([entry["body_quat_w"] for entry in trajectory_data], dim=0)
+        self._body_lin_vel_w = torch.cat([entry["body_lin_vel_w"] for entry in trajectory_data], dim=0)
+        self._body_ang_vel_w = torch.cat([entry["body_ang_vel_w"] for entry in trajectory_data], dim=0)
+
+        joint_dim = int(self.joint_pos.shape[1])
+        self.has_joint_action = any("joint_action" in entry for entry in trajectory_data)
+        if self.has_joint_action:
+            action_chunks = []
+            for entry in trajectory_data:
+                if "joint_action" in entry:
+                    chunk = entry["joint_action"]
+                    if chunk.shape[1] != joint_dim:
+                        raise ValueError(
+                            f"Motion action dimension mismatch: expected {joint_dim}, got {int(chunk.shape[1])}."
+                        )
+                else:
+                    chunk = torch.zeros(entry["joint_pos"].shape[0], joint_dim, dtype=torch.float32, device=self.device)
+                action_chunks.append(chunk)
+            self.joint_action = torch.cat(action_chunks, dim=0)
+        else:
+            self.joint_action = torch.zeros_like(self.joint_pos)
 
     def _to_trajectory_tensors(self, motion: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
         joint_pos = torch.tensor(np.asarray(motion["joint_pos"]), dtype=torch.float32, device=self.device)
@@ -374,19 +521,21 @@ class MotionLoader:
                 f"Invalid trajectory index {trajectory_idx}. Expected in [0, {self.num_trajectories - 1}] "
                 "(or negative equivalent)."
             )
-        entry = self._trajectory_data[idx]
+        start = int(self.trajectory_start_time_step[idx].item())
+        length = int(self.trajectory_time_step_total[idx].item())
+        end = start + length
         data = {
-            "joint_pos": entry["joint_pos"],
-            "joint_vel": entry["joint_vel"],
-            "body_pos_w": entry["body_pos_w"],
-            "body_quat_w": entry["body_quat_w"],
-            "body_lin_vel_w": entry["body_lin_vel_w"],
-            "body_ang_vel_w": entry["body_ang_vel_w"],
+            "joint_pos": self.joint_pos[start:end],
+            "joint_vel": self.joint_vel[start:end],
+            "body_pos_w": self._body_pos_w[start:end],
+            "body_quat_w": self._body_quat_w[start:end],
+            "body_lin_vel_w": self._body_lin_vel_w[start:end],
+            "body_ang_vel_w": self._body_ang_vel_w[start:end],
         }
-        if "joint_action" in entry:
-            data["actions"] = entry["joint_action"]
-            data["action"] = entry["joint_action"]
-            data["joint_action"] = entry["joint_action"]
+        if self.has_joint_action:
+            data["actions"] = self.joint_action[start:end]
+            data["action"] = self.joint_action[start:end]
+            data["joint_action"] = self.joint_action[start:end]
         return data
 
 
