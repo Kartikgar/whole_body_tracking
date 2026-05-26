@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Genesis sim2sim evaluator</title>
+  <style>
+    :root {
+      --bg: #fafbfc;
+      --text: #1f2328;
+      --muted: #57606a;
+      --accent: #0969da;
+      --code-bg: #f6f8fa;
+      --border: #d0d7de;
+      --warn-bg: #fff8e6;
+      --warn-border: #d4a72c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      line-height: 1.65;
+      max-width: 46rem;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 4rem;
+      background: var(--bg);
+      color: var(--text);
+    }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 600;
+      line-height: 1.25;
+      margin-bottom: 0.5rem;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.95rem;
+      margin-bottom: 2rem;
+    }
+    h2 {
+      font-size: 1.25rem;
+      margin-top: 2.25rem;
+      padding-bottom: 0.35rem;
+      border-bottom: 1px solid var(--border);
+    }
+    h3 {
+      font-size: 1.05rem;
+      margin-top: 1.5rem;
+    }
+    p { margin: 0.85rem 0; }
+    .muted { color: var(--muted); }
+    code, pre {
+      font-family: ui-monospace, "Cascadia Code", monospace;
+      font-size: 0.88em;
+    }
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem 1.1rem;
+      overflow-x: auto;
+      line-height: 1.45;
+    }
+    .formula {
+      background: var(--code-bg);
+      border-left: 3px solid var(--accent);
+      padding: 0.75rem 1rem;
+      margin: 1rem 0;
+      border-radius: 0 6px 6px 0;
+    }
+    ul { padding-left: 1.35rem; }
+    li { margin: 0.4rem 0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.92rem;
+      margin: 1rem 0;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 0.45rem 0.65rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: var(--code-bg); }
+    .diagram {
+      background: var(--code-bg);
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin: 1.25rem 0;
+      font-family: ui-monospace, monospace;
+      font-size: 0.82rem;
+      line-height: 1.4;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout {
+      background: var(--warn-bg);
+      border: 1px solid var(--warn-border);
+      border-radius: 8px;
+      padding: 0.85rem 1rem;
+      margin: 1rem 0;
+      font-size: 0.95rem;
+    }
+    a { color: var(--accent); }
+    footer {
+      margin-top: 3rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+
+<h1>Genesis sim2sim evaluator</h1>
+<p class="subtitle">
+  How <code>scripts/rsl_rl/evaluate_sim2sim_genesis.py</code> runs exported ONNX policies from Isaac Lab inside Genesis,
+  reconstructs Isaac-style observations, and applies target-environment actuator dynamics.
+</p>
+
+<h2>What this script does</h2>
+<p>
+  This script is a <strong>Genesis-based sim2sim evaluator</strong>. It takes an ONNX policy exported from this repo
+  (via <code>scripts/rsl_rl/play.py</code> or <code>MotionOnPolicyRunner</code>), loads it with ONNX Runtime, and
+  rolls it out in a Genesis simulation of the G1 humanoid.
+</p>
+<p>
+  The goal is to test whether a policy trained in Isaac Lab still tracks a reference motion when the low-level
+  actuator model and simulator change. In your Delta-A experiments, Genesis plays the role of the
+  <strong>target environment</strong> via perturbed Kp/Kd gains in an explicit PD torque loop.
+</p>
+<p class="muted">
+  Related docs:
+  <a href="project_understanding.md">project_understanding.md</a>,
+  <a href="delta_action_finetuning_implementation.md">delta_action_finetuning_implementation.md</a>.
+</p>
+
+<h2>Big picture</h2>
+<p>Think of the evaluator as three layers:</p>
+<ol>
+  <li><strong>Policy runtime</strong> — ONNX inference + metadata from export</li>
+  <li><strong>Isaac-compatible logic</strong> — observation construction and action post-processing</li>
+  <li><strong>Genesis physics loop</strong> — PD torques, optional domain randomization, metrics, video, trajectory logging</li>
+</ol>
+
+<div class="diagram">  ONNX policy
+       |
+       +--- actions --------------------> action post-process --> joint target
+       |
+       +--- reference motion (joint/body) -> observation builder
+                                              ^
+                                              |
+  Genesis robot state ------------------------+
+
+  joint target --> PD torques --> scene.step() --> new robot state
+                                                      |
+                                                      +--> metrics / video / NPZ</div>
+
+<p>At each control step the script:</p>
+<ol>
+  <li>Builds an observation from Genesis state + reference motion.</li>
+  <li>Runs the ONNX policy.</li>
+  <li>Converts the policy action into a joint target.</li>
+  <li>Applies PD torques in Genesis for several physics substeps.</li>
+  <li>Reads the new state, logs metrics, and repeats.</li>
+</ol>
+
+<h2>File structure</h2>
+<p>
+  Almost everything lives in one class: <code>Sim2SimEvaluatorGenesis</code>.
+  The file is long, but most sections have a single responsibility.
+</p>
+
+<table>
+  <thead>
+    <tr><th>Approx. lines</th><th>Section</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>1–150</td><td>Docstring, imports, ONNX metadata helpers</td></tr>
+    <tr><td>151–395</td><td>Quaternion math, MPJPE-style metrics</td></tr>
+    <tr><td>397–490</td><td>Parse ONNX metadata into <code>PolicyMeta</code></td></tr>
+    <tr><td>505–786</td><td><code>Sim2SimEvaluatorGenesis.__init__</code> — setup</td></tr>
+    <tr><td>788–1056</td><td>Domain randomization, trajectory logging helpers</td></tr>
+    <tr><td>1058–1352</td><td>Observation building, policy inference, state extraction</td></tr>
+    <tr><td>1354–1481</td><td>Action → torque, tracking metrics, termination</td></tr>
+    <tr><td>1483–1767</td><td>Main rollout loop <code>evaluate()</code></td></tr>
+    <tr><td>1805–2014</td><td>CLI and <code>main()</code></td></tr>
+  </tbody>
+</table>
+
+<h2>The ONNX policy is more than an actor</h2>
+<p>
+  The exported policy is a <strong>motion-tracking bundle</strong>, not just a neural network mapping obs → action.
+</p>
+
+<h3>Inputs</h3>
+<ul>
+  <li><code>obs</code> — flattened policy observation vector</li>
+  <li><code>time_step</code> — index into the embedded reference motion</li>
+</ul>
+
+<h3>Outputs</h3>
+<ul>
+  <li><code>actions</code> — policy action</li>
+  <li><code>joint_pos</code>, <code>joint_vel</code></li>
+  <li><code>body_pos_w</code>, <code>body_quat_w</code>, <code>body_lin_vel_w</code>, <code>body_ang_vel_w</code></li>
+</ul>
+
+<p>
+  The reference motion tensors are baked into the ONNX at export time from the motion used during export.
+  Genesis uses them as the <strong>reference trajectory</strong> for both observations and metrics.
+</p>
+
+<p>So the policy plays two roles:</p>
+<ul>
+  <li><strong>Controller</strong> — outputs <code>actions</code></li>
+  <li><strong>Reference motion server</strong> — outputs reference states at each <code>time_step</code></li>
+</ul>
+
+<p>
+  That is why <code>_fetch_reference_batch()</code> can call the policy with zero observations and still recover
+  reference joint/body states for a given timestep.
+</p>
+
+<h2>Startup (<code>__init__</code>)</h2>
+<p>When you construct <code>Sim2SimEvaluatorGenesis</code>, it performs these setup steps.</p>
+
+<h3>A. Load policy metadata</h3>
+<p>From ONNX metadata (<code>attach_onnx_metadata</code>) it reads:</p>
+<ul>
+  <li>joint names and default joint positions</li>
+  <li>action scales</li>
+  <li>observation term names and history lengths</li>
+  <li>tracking body names and anchor body</li>
+  <li>nominal Kp/Kd from Isaac export</li>
+</ul>
+
+<p>
+  Then it perturbs Kp/Kd for the target environment. The current implementation uses a fixed RNG seed
+  (<code>_EVAL_KP_KD_PERTURB_RNG_SEED = 913571</code>) and applies a Gaussian-scaled perturbation:
+</p>
+
+<pre>joint_stiffness_final = Kp_orig * (1 + 0.27 * N(0, 1))
+joint_damping_final   = Kd_orig * (1 + 0.27 * N(0, 1))</pre>
+
+<p class="muted">
+  This Kp/Kd perturbation seed is separate from <code>--seed</code> / evaluation seed used for obs noise and DR.
+</p>
+
+<h3>B. Create ONNX Runtime session</h3>
+<p>Runs inference on CPU or CUDA (<code>--policy_device</code>).</p>
+
+<h3>C. Build Genesis scene</h3>
+<ul>
+  <li>ground plane</li>
+  <li>G1 URDF robot (<code>--urdf_file</code>)</li>
+  <li>optional white reference marker spheres (<code>--show_reference</code>)</li>
+  <li>optional camera for video (<code>--record_video</code>)</li>
+  <li>optional parallel envs (<code>--num_envs</code>)</li>
+</ul>
+
+<h3>D. Map joints and links</h3>
+<p>
+  Metadata joint names are mapped to Genesis DOF indices. Metadata body names are mapped to Genesis links for
+  observation construction and metrics.
+</p>
+
+<h3>E. Optional motion file</h3>
+<p>
+  <code>--motion_file</code> is only required if the policy observation includes
+  <code>motion_joint_action</code> (open-loop delta policies). Standard finetuned tracking policies do not need it
+  for reference motion, because reference states come from the ONNX itself.
+</p>
+
+<h3>F. Infer rollout length</h3>
+<p>
+  The script inspects the ONNX graph to infer embedded reference motion length, then sets:
+</p>
+<div class="formula">max_steps = reference_motion_length − start_timestep</div>
+
+<h2>One control step</h2>
+<p>The core loop lives in <code>evaluate()</code>:</p>
+
+<pre>for t_step in range(max_steps):
+    ref_step = start_timestep + t_step
+    policy_out = run_policy(obs, ref_step)
+    action = policy_out["actions"]
+    ref = policy_out joint/body reference tensors
+
+    joint_target = compute_joint_target(action, ref_step)
+    maybe_apply_interval_push(t_step)
+    step_simulation(joint_target)
+
+    state = extract_state()
+    compute metrics / logging
+
+    last_action = action
+    obs = build_observation(state, ref_next, ref_step + 1)</pre>
+
+<h3>Step 1 — Policy inference</h3>
+<p><code>_run_policy(obs, time_step)</code> returns actions plus reference motion tensors.</p>
+
+<h3>Step 2 — Action post-processing</h3>
+<p>For standard tracking policies:</p>
+<div class="formula">q_des = q_default + action_scale ⊙ a</div>
+
+<p>For open-loop delta policies that include <code>motion_joint_action</code> in the observation:</p>
+<div class="formula">a_processed = a_policy + a_motion(time_step)</div>
+<div class="formula">q_des = q_default + action_scale ⊙ a_processed</div>
+
+<h3>Step 3 — Low-level control in Genesis</h3>
+<p>
+  Unlike Isaac’s implicit actuator, Genesis uses an explicit PD torque law repeated for
+  <code>sim_decimation = control_dt / sim_dt</code> substeps (default 20):
+</p>
+<div class="formula">τ = Kp ⊙ (q_des − q) − Kd ⊙ q̇</div>
+<p>Then <code>robot.control_dofs_force(τ)</code> and <code>scene.step()</code>.</p>
+
+<h3>Step 4 — Read robot state</h3>
+<p>Joint positions/velocities and body poses/velocities are read back from Genesis links.</p>
+
+<h3>Step 5 — Build next observation</h3>
+<p>Isaac-style observation terms are reconstructed and concatenated in metadata order.</p>
+
+<h2>Observation building</h2>
+<p>
+  <code>_build_observation()</code> manually reconstructs the Isaac Lab <code>policy</code> observation group.
+  Supported terms and dimensions are hardcoded in <code>_build_term_dims()</code>:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Term</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>command</code></td><td><code>[ref_joint_pos, ref_joint_vel]</code></td></tr>
+    <tr><td><code>motion_anchor_pos_b</code></td><td>Anchor position error in robot frame</td></tr>
+    <tr><td><code>motion_anchor_ori_b</code></td><td>Anchor orientation error (6D rotation columns)</td></tr>
+    <tr><td><code>base_lin_vel</code></td><td>Root linear velocity in body frame</td></tr>
+    <tr><td><code>base_ang_vel</code></td><td>Root angular velocity in body frame</td></tr>
+    <tr><td><code>joint_pos</code></td><td>Joint positions relative to default</td></tr>
+    <tr><td><code>joint_vel</code></td><td>Joint velocities</td></tr>
+    <tr><td><code>actions</code></td><td>Previous policy action (<code>last_action</code>)</td></tr>
+    <tr><td><code>motion_joint_action</code></td><td>Optional; for delta open-loop policies</td></tr>
+  </tbody>
+</table>
+
+<p>Additional behavior:</p>
+<ul>
+  <li>observation history stacks via per-term deques</li>
+  <li>optional uniform noise on selected terms (<code>--add_noise</code>, default on)</li>
+  <li>strict dimension check against ONNX input size</li>
+</ul>
+
+<h2>Episode reset</h2>
+<p>At the start of each rollout:</p>
+<ol>
+  <li>Fetch reference state at <code>start_timestep</code> from ONNX.</li>
+  <li>Place the robot at the reference root pose and joint positions.</li>
+  <li>Zero velocities.</li>
+  <li>Reset observation history and <code>last_action</code>.</li>
+  <li>Optionally apply domain randomization for this rollout.</li>
+</ol>
+
+<h2>Domain randomization</h2>
+<p>With <code>--domain_randomization</code> (default on), Genesis attempts to mirror Isaac DR:</p>
+<ul>
+  <li>randomized default joint offsets</li>
+  <li>randomized friction / restitution</li>
+  <li>randomized base COM</li>
+  <li>interval pushes on root DOFs</li>
+</ul>
+<p class="muted">
+  Much of the extra code in this file exists to handle Genesis API/version differences for these randomization calls.
+</p>
+
+<h2>Metrics and termination</h2>
+<p>Each step computes Isaac-style tracking errors and reward-like terms:</p>
+<ul>
+  <li>anchor position / orientation error</li>
+  <li>body position / orientation error</li>
+  <li>joint position / velocity error</li>
+  <li>exponential tracking reward components</li>
+</ul>
+
+<p>Early termination checks include:</p>
+<ul>
+  <li>anchor height mismatch</li>
+  <li>anchor orientation mismatch via projected gravity difference</li>
+</ul>
+
+<p>With <code>--compute_metrics</code>, the script also reports:</p>
+<ul>
+  <li>MPJPE global and local</li>
+  <li>velocity distance</li>
+  <li>acceleration distance</li>
+</ul>
+
+<p>
+  A rollout is counted as successful if the env survives until near the end of the motion
+  (<code>max_steps − 5</code>).
+</p>
+
+<h2>Operating modes</h2>
+<table>
+  <thead>
+    <tr><th>Flag</th><th>Purpose</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--record_video</code></td><td>Save rollout video</td></tr>
+    <tr><td><code>--viewer</code></td><td>Show live Genesis viewer</td></tr>
+    <tr><td><code>--compute_metrics</code></td><td>MPJPE / velocity / acceleration stats</td></tr>
+    <tr><td><code>--record_motion</code> + <code>--output_motion_npz</code></td><td>Collect trajectories for delta training</td></tr>
+    <tr><td><code>--num_envs</code></td><td>Parallel envs for faster metric collection</td></tr>
+    <tr><td><code>--show_reference</code></td><td>Visualize reference body targets as white spheres</td></tr>
+    <tr><td><code>--seed</code></td><td>Reproducible obs noise, DR, and Genesis seed when supported</td></tr>
+  </tbody>
+</table>
+
+<p><code>main()</code> writes a one-row CSV/JSON summary at the end.</p>
+
+<h2>Important design choices</h2>
+
+<div class="callout">
+  <strong>1. Reference motion comes from ONNX, not <code>--motion_file</code>.</strong><br />
+  The motion file is only needed for policies whose observation includes <code>motion_joint_action</code>.
+  The tracking reference itself is embedded in the exported ONNX.
+</div>
+
+<div class="callout">
+  <strong>2. Target env = perturbed Kp/Kd in Genesis PD loop.</strong><br />
+  This is where your gain-shift experiment lives. It is separate from Isaac training dynamics.
+</div>
+
+<div class="callout">
+  <strong>3. Only the base policy is deployed here.</strong><br />
+  There is no delta-policy branch in this evaluator. That matches the intended deployment story for
+  Delta-A finetuned checkpoints.
+</div>
+
+<div class="callout">
+  <strong>4. Actuator model differs from Isaac.</strong><br />
+  Isaac uses implicit actuators; Genesis uses explicit PD torques each substep. Even with matched Kp/Kd numbers,
+  the resulting closed-loop dynamics may not match exactly.
+</div>
+
+<div class="callout">
+  <strong>5. Batch handling.</strong><br />
+  The script supports vectorized Genesis envs, but ONNX may fall back to per-env inference if the model was
+  exported with fixed batch size 1.
+</div>
+
+<h2>Minimal mental model</h2>
+<p>If you ignore logging, DR, and metrics, the evaluator reduces to:</p>
+
+<pre>while t &lt; motion_length:
+    obs = f(genesis_state, reference_motion[t])
+    a, ref = onnx_policy(obs, t)
+    q_des = q_default + scale * a
+    tau = Kp * (q_des - q) - Kd * qdot
+    genesis.step(tau)
+    t += 1</pre>
+
+<p>
+  Everything else — quaternion math, DR, MPJPE, NPZ export, video — wraps around this core control loop.
+</p>
+
+<h2>Relation to Delta-A sim2real</h2>
+<p>
+  In the Delta-A pipeline, Isaac Lab is the source simulator and Genesis is the target simulator.
+  Open-loop delta training learns a helper that makes the assisted source environment behave more like the target.
+  Finetuning then trains the base policy under those assisted dynamics.
+</p>
+<p>
+  This Genesis evaluator tests the <strong>deployed finetuned base policy alone</strong> under perturbed actuator
+  gains. It does not run the frozen delta policy at inference time. Whether transfer succeeds therefore depends on
+  how well the delta-assisted source dynamics matched the true Genesis target dynamics during finetuning.
+</p>
+<p class="muted">
+  See also: <a href="project_understanding.md">project_understanding.md</a>.
+</p>
+
+<h2>Example command</h2>
+<pre>python scripts/rsl_rl/evaluate_sim2sim_genesis.py \
+  --policy_path logs/rsl_rl/.../exported/model_59000.onnx \
+  --urdf_file source/whole_body_tracking/whole_body_tracking/assets/unitree_description/urdf/g1/main.urdf \
+  --num_envs 1 \
+  --backend cpu \
+  --policy_device cpu \
+  --seed 42 \
+  --record_video \
+  --video_name logs/sim2sim_eval/run.mp4</pre>
+
+<footer>
+  Script: <code>whole_body_tracking/scripts/rsl_rl/evaluate_sim2sim_genesis.py</code><br />
+  Export path: <code>whole_body_tracking/utils/exporter.py</code>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Play evaluation workflows</title>
+  <style>
+    :root {
+      --bg: #fafbfc;
+      --text: #1f2328;
+      --muted: #57606a;
+      --accent: #0969da;
+      --code-bg: #f6f8fa;
+      --border: #d0d7de;
+      --warn-bg: #fff8e6;
+      --warn-border: #d4a72c;
+      --ok-bg: #eefbf3;
+      --ok-border: #1a7f37;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      line-height: 1.65;
+      max-width: 46rem;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 4rem;
+      background: var(--bg);
+      color: var(--text);
+    }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 600;
+      line-height: 1.25;
+      margin-bottom: 0.5rem;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.95rem;
+      margin-bottom: 2rem;
+    }
+    h2 {
+      font-size: 1.25rem;
+      margin-top: 2.25rem;
+      padding-bottom: 0.35rem;
+      border-bottom: 1px solid var(--border);
+    }
+    h3 {
+      font-size: 1.05rem;
+      margin-top: 1.5rem;
+    }
+    p { margin: 0.85rem 0; }
+    .muted { color: var(--muted); }
+    code, pre {
+      font-family: ui-monospace, "Cascadia Code", monospace;
+      font-size: 0.88em;
+    }
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem 1.1rem;
+      overflow-x: auto;
+      line-height: 1.45;
+    }
+    .formula {
+      background: var(--code-bg);
+      border-left: 3px solid var(--accent);
+      padding: 0.75rem 1rem;
+      margin: 1rem 0;
+      border-radius: 0 6px 6px 0;
+    }
+    ul, ol { padding-left: 1.35rem; }
+    li { margin: 0.4rem 0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.92rem;
+      margin: 1rem 0;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 0.45rem 0.65rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: var(--code-bg); }
+    .diagram {
+      background: var(--code-bg);
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin: 1.25rem 0;
+      font-family: ui-monospace, monospace;
+      font-size: 0.82rem;
+      line-height: 1.4;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout {
+      background: var(--warn-bg);
+      border: 1px solid var(--warn-border);
+      border-radius: 8px;
+      padding: 0.85rem 1rem;
+      margin: 1rem 0;
+      font-size: 0.95rem;
+    }
+    .callout-ok {
+      background: var(--ok-bg);
+      border: 1px solid var(--ok-border);
+      border-radius: 8px;
+      padding: 0.85rem 1rem;
+      margin: 1rem 0;
+      font-size: 0.95rem;
+    }
+    a { color: var(--accent); }
+    footer {
+      margin-top: 3rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+
+<h1>Play evaluation workflows</h1>
+<p class="subtitle">
+  How <code>scripts/rsl_rl/play.py</code> evaluates policies in Isaac Lab, what gets exported to ONNX,
+  and how that connects to Genesis sim2sim evaluation for the three main policy types in the Delta-A pipeline.
+</p>
+
+<h2>What this document covers</h2>
+<p>
+  This repo has three distinct evaluation stories that all go through <code>play.py</code> for in-Isaac rollout,
+  but differ in task config, observation space, action composition, and what you deploy in Genesis:
+</p>
+<ol>
+  <li><strong>Pre-trained base policy</strong> — standard motion tracking (<code>Tracking-Flat-G1-v0</code>)</li>
+  <li><strong>Open-loop delta policy</strong> — dynamics emulator trained with motion actions (<code>Tracking-Flat-G1-DeltaA-OpenLoop-v0</code>)</li>
+  <li><strong>Finetuned base policy</strong> — tracking policy trained with frozen delta assistance (<code>Tracking-Flat-G1-DeltaA-Finetune-v0</code>)</li>
+</ol>
+<p class="muted">
+  Related docs:
+  <a href="genesis_sim2sim_evaluator.html">genesis_sim2sim_evaluator.html</a>,
+  <a href="delta_action_finetuning_implementation.md">delta_action_finetuning_implementation.md</a>,
+  <a href="project_understanding.md">project_understanding.md</a>.
+</p>
+
+<h2>Shared setup in play.py</h2>
+<p>
+  Regardless of policy type, <code>play.py</code> follows the same outer shell:
+</p>
+<ol>
+  <li>Parse CLI args and load Hydra task config via <code>@hydra_task_config</code>.</li>
+  <li>Resolve checkpoint from <code>--checkpoint</code>, <code>--wandb_path</code>, or log directory.</li>
+  <li>For motion tasks: disable adaptive reference sampling for deterministic playback.</li>
+  <li>Optionally override <code>--motion_file</code>, <code>--delta_action_space</code>, <code>--disable_dr</code>.</li>
+  <li>Create Isaac env, wrap with <code>RslRlVecEnvWrapper</code>.</li>
+  <li>Load checkpoint via <code>MotionOnPolicyRunner</code> (same class used in training).</li>
+  <li>Export ONNX from the loaded actor to <code>{checkpoint_dir}/exported/</code>.</li>
+  <li>Run the rollout loop; optionally record video or delta-model dataset NPZ.</li>
+</ol>
+
+<div class="diagram">  CLI + Hydra task config
+         |
+         v
+  env_cfg overrides (motion, DR, delta action space)
+         |
+         v
+  gym.make(task) --> RslRlVecEnvWrapper
+         |
+         v
+  MotionOnPolicyRunner.load(checkpoint)
+         |
+         +--> export ONNX (actor only)
+         |
+         v
+  rollout loop --> env.step(actions)
+         |
+         v
+  optional: video / delta dataset / cleanup buffers</div>
+
+<h3>Deterministic motion playback</h3>
+<p>
+  For any task with a motion command, play always sets:
+</p>
+<pre>env_cfg.commands.motion.adaptive_alpha = 0.0
+env_cfg.commands.motion.sample_time_steps = False</pre>
+<p>
+  Evaluation runs the reference motion sequentially from the start instead of using training-style adaptive resampling.
+</p>
+
+<h3>Runner and ONNX export</h3>
+<p>
+  All three flows use <code>MotionOnPolicyRunner</code>. ONNX export always serializes
+  <code>ppo_runner.alg.policy</code> — the checkpoint you loaded — plus observation metadata from the env.
+  It does <strong>not</strong> export a composed two-policy controller.
+</p>
+
+<table>
+  <thead>
+    <tr><th>Policy type</th><th>What ONNX contains</th><th>What Genesis runs</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Pre-trained base</td>
+      <td>Base tracking actor</td>
+      <td>Same base actor</td>
+    </tr>
+    <tr>
+      <td>Open-loop delta</td>
+      <td>Delta actor (132-d obs incl. <code>motion_joint_action</code>)</td>
+      <td>Same delta actor + motion NPZ actions</td>
+    </tr>
+    <tr>
+      <td>Finetuned base</td>
+      <td>Finetuned base actor only</td>
+      <td>Base actor only (no frozen delta)</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>Deployment intent for Delta-A finetune:</strong>
+  the frozen delta policy is a <em>training-time dynamics emulator</em>. At inference you deploy only the finetuned base policy.
+  Isaac finetune play still runs <code>base + frozen delta</code> to match training rollouts; Genesis sim2sim tests base-only under perturbed Kp/Kd.
+</div>
+
+<h2>Comparison at a glance</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th></th>
+      <th>Pre-trained base</th>
+      <th>Open-loop delta</th>
+      <th>Finetuned base</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Task ID</strong></td>
+      <td><code>Tracking-Flat-G1-v0</code></td>
+      <td><code>Tracking-Flat-G1-DeltaA-OpenLoop-v0</code></td>
+      <td><code>Tracking-Flat-G1-DeltaA-Finetune-v0</code></td>
+    </tr>
+    <tr>
+      <td><strong>Checkpoint loaded</strong></td>
+      <td>Base tracking policy</td>
+      <td>Delta policy</td>
+      <td>Finetuned base policy</td>
+    </tr>
+    <tr>
+      <td><strong>Second policy at play</strong></td>
+      <td>None</td>
+      <td>None</td>
+      <td>Frozen open-loop delta (<code>--delta_policy_checkpoint</code>)</td>
+    </tr>
+    <tr>
+      <td><strong>Obs group for actor</strong></td>
+      <td><code>policy</code> (motion-tracking)</td>
+      <td><code>policy</code> (<code>DeltaOpenLoopPolicyObsCfg</code>)</td>
+      <td><code>policy</code> (motion-tracking) + separate <code>delta_policy</code> group</td>
+    </tr>
+    <tr>
+      <td><strong>Action term</strong></td>
+      <td><code>JointPositionAction</code></td>
+      <td><code>DeltaJointPositionAction</code></td>
+      <td><code>ExternalDeltaJointPositionAction</code></td>
+    </tr>
+    <tr>
+      <td><strong>Final joint command</strong></td>
+      <td><code>scale * a_base + offset</code></td>
+      <td><code>scale * (a_delta + motion_action) + offset</code></td>
+      <td><code>scale * (a_base + a_delta_frozen) + offset</code></td>
+    </tr>
+    <tr>
+      <td><strong>Motion NPZ needs actions</strong></td>
+      <td>No</td>
+      <td>Yes (<code>action</code> / <code>actions</code>)</td>
+      <td>No (for base obs); delta uses proprioception + base action</td>
+    </tr>
+    <tr>
+      <td><strong>Genesis eval script</strong></td>
+      <td><code>evaluate_sim2sim_genesis.py</code></td>
+      <td>Same (requires <code>--motion_file</code> with actions)</td>
+      <td>Same (base ONNX only)</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ============================================================ -->
+<h2>1. Pre-trained base policy evaluation</h2>
+<p>
+  This is standard BeyondMimic-style whole-body tracking. The policy closes the loop on reference motion
+  using anchor-relative observations and outputs joint position targets directly.
+</p>
+
+<h3>Isaac play flow</h3>
+<div class="diagram">  motion command (reference pose/vel)
+         |
+         v
+  build policy obs (command, anchor error, proprioception, last_action)
+         |
+         v
+  a_base = base_policy(obs)
+         |
+         v
+  env.step(a_base)  -->  q_target = scale * a_base + offset</div>
+
+<h3>Policy observation (<code>policy</code> group)</h3>
+<p>From <code>TrackingEnvCfg.ObservationsCfg.PolicyCfg</code>:</p>
+<ol>
+  <li><code>command</code> — generated motion command</li>
+  <li><code>motion_anchor_pos_b</code> — reference anchor position in robot base frame</li>
+  <li><code>motion_anchor_ori_b</code> — reference anchor orientation (first two columns of rotation matrix)</li>
+  <li><code>base_lin_vel</code>, <code>base_ang_vel</code></li>
+  <li><code>joint_pos</code>, <code>joint_vel</code> (relative to default)</li>
+  <li><code>actions</code> — previous base policy action (<code>last_action</code>)</li>
+</ol>
+<p>
+  This group has observation corruption enabled during training; use <code>--disable_dr</code> for clean eval.
+</p>
+
+<h3>Example Isaac command</h3>
+<pre>python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-v0 \
+  --checkpoint /path/to/base_model.pt \
+  --motion_file /path/to/walk1_subject1.npz \
+  --num_envs 4 \
+  --disable_dr \
+  --video</pre>
+
+<h3>Genesis sim2sim flow</h3>
+<div class="diagram">  Genesis state + reference motion from ONNX metadata
+         |
+         v
+  rebuild base policy obs (same term order as export metadata)
+         |
+         v
+  a_base = ONNX(a_base_obs)
+         |
+         v
+  q_target = scale * a_base + offset
+         |
+         v
+  PD torques with perturbed Kp/Kd --> scene.step()</div>
+<p>
+  See <a href="genesis_sim2sim_evaluator.html">genesis_sim2sim_evaluator.html</a> for PD loop, Kp/Kd perturbation,
+  metrics, and domain randomization details.
+</p>
+
+<div class="callout-ok">
+  <strong>Alignment:</strong> Isaac play and Genesis sim2sim run the same controller — one base policy, same obs layout, same action post-processing.
+  Poor Genesis performance here means direct sim-to-sim transfer failure under target actuator dynamics.
+</div>
+
+<!-- ============================================================ -->
+<h2>2. Open-loop delta policy evaluation</h2>
+<p>
+  The open-loop delta policy is trained as a <strong>dynamics correction emulator</strong>. It does not track motion
+  via anchor observations. Instead it sees proprioceptive state plus the recorded open-loop motion action from the NPZ,
+  and outputs a delta correction that is added to that motion action before PD control.
+</p>
+
+<h3>Isaac play flow</h3>
+<div class="diagram">  motion NPZ provides joint_action[t] (open-loop reference)
+         |
+         v
+  build delta policy obs (proprio + contact + last_delta + motion_joint_action)
+         |
+         v
+  a_delta = delta_policy(obs)
+         |
+         v
+  env.step(a_delta)
+         |
+         v
+  q_target = scale * (a_delta + motion_joint_action[t]) + offset</div>
+<p>
+  In this mode <code>ppo_runner.delta_policy is None</code>. The loaded checkpoint <em>is</em> the delta policy.
+  There is no second frozen policy branch in the play loop.
+</p>
+
+<h3>Delta policy observation (<code>DeltaOpenLoopPolicyObsCfg</code>)</h3>
+<p>Terms are concatenated in this order (approx. 132-d for whole-body G1):</p>
+<table>
+  <thead>
+    <tr><th>Term</th><th>Dim (typical)</th><th>Scale</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>base_pos_z</code></td><td>1</td><td>1.0</td><td>Root height</td></tr>
+    <tr><td><code>feet_contact_force</code></td><td>6</td><td>0.01</td><td>Left/right ankle contact forces (world frame)</td></tr>
+    <tr><td><code>base_lin_vel</code></td><td>3</td><td>2.0</td><td>Base linear velocity</td></tr>
+    <tr><td><code>base_ang_vel</code></td><td>3</td><td>0.25</td><td>Base angular velocity</td></tr>
+    <tr><td><code>projected_gravity</code></td><td>3</td><td>1.0</td><td>Gravity in base frame</td></tr>
+    <tr><td><code>joint_pos</code></td><td>29</td><td>1.0</td><td>Joint positions relative to default</td></tr>
+    <tr><td><code>joint_vel</code></td><td>29</td><td>0.05</td><td>Joint velocities</td></tr>
+    <tr><td><code>actions</code></td><td>29</td><td>1.0</td><td>Previous delta output (<code>last_action</code>)</td></tr>
+    <tr><td><code>motion_joint_action</code></td><td>29</td><td>1.0</td><td>Open-loop action from motion NPZ at current time index</td></tr>
+  </tbody>
+</table>
+<p>
+  Notably absent from the actor: <code>command</code>, <code>motion_anchor_pos_b</code>, <code>motion_anchor_ori_b</code>.
+  The critic during training does receive full motion/command terms for value estimation only.
+</p>
+
+<h3>Per-step play loop (simplified)</h3>
+<pre>policy_actions = policy(obs)          # delta policy
+actions = policy_actions                # passed to env.step
+obs, _, dones, _ = env.step(actions)   # env adds motion_joint_action internally</pre>
+
+<h3>Example Isaac command</h3>
+<pre>python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-DeltaA-OpenLoop-v0 \
+  --checkpoint /path/to/delta_open_loop_model.pt \
+  --motion_file /path/to/motion_with_actions.npz \
+  --num_envs 4 \
+  --disable_dr \
+  --video</pre>
+
+<div class="callout">
+  <strong>Motion file requirement:</strong>
+  open-loop delta evaluation requires an NPZ with <code>action</code> or <code>actions</code>.
+  Without it, <code>DeltaJointPositionAction</code> raises at runtime and <code>motion_joint_action</code> cannot be built.
+</div>
+
+<h3>Genesis sim2sim flow</h3>
+<div class="diagram">  Genesis state
+         |
+         +--> rebuild delta obs (proprio + contact + last_delta)
+         |
+  motion NPZ action[t] --> motion_joint_action term
+         |
+         v
+  a_delta = ONNX(delta_obs)
+         |
+         v
+  q_target = scale * (a_delta + motion_action[t]) + offset
+         |
+         v
+  PD torques (perturbed Kp/Kd) --> scene.step()</div>
+<p>
+  Genesis detects <code>motion_joint_action</code> in ONNX metadata and requires <code>--motion_file</code> with action arrays.
+  The evaluator feeds recorded motion actions into the observation builder each step, matching Isaac open-loop semantics.
+</p>
+
+<h3>Debug flags useful for delta eval</h3>
+<ul>
+  <li><code>--replay_motion_actions_only</code> — zero policy output; env still applies motion action (tests NPZ replay alone).</li>
+  <li><code>--record_delta_model_dataset</code> — log obs/action trajectories for retraining delta models.</li>
+  <li><code>--delta_action_space ankles|lower_body|com_force</code> — evaluate subset or COM-force delta modes.</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2>3. Finetuned base policy evaluation</h2>
+<p>
+  Finetune training keeps a frozen open-loop delta policy active during rollouts so the base policy learns
+  under assisted dynamics. Evaluation has two distinct meanings:
+</p>
+<ol>
+  <li><strong>In-Isaac play</strong> — validates finetuned base under the same assisted dynamics used in training.</li>
+  <li><strong>Genesis sim2sim</strong> — validates deployment-style base-only control in the target environment.</li>
+</ol>
+
+<h3>Isaac play flow (assisted dynamics)</h3>
+<div class="diagram">  build base policy obs --> a_base = finetuned_base(obs)
+         |
+         |  runner injects a_base into delta_base_actions buffer
+         v
+  build delta_policy obs:
+    - actions        = previous frozen delta (delta_external_actions)
+    - current_action = same-step a_base (delta_base_actions)
+         |
+         v
+  a_delta = frozen_delta_policy(delta_obs)
+         |
+         |  runner injects a_delta into delta_external_actions buffer
+         v
+  env.step(a_base)  -->  q_target = scale * (a_base + a_delta) + offset</div>
+
+<h3>Per-step play loop (finetune branch)</h3>
+<pre>policy_actions = policy(obs)                     # finetuned base
+actions = policy_actions
+
+ppo_runner._set_delta_base_action_buffer(actions)
+delta_obs = ppo_runner._compute_delta_policy_obs()
+delta_actions = ppo_runner._compute_delta_actions(delta_obs)
+ppo_runner._set_delta_action_buffer(delta_actions)
+
+obs, _, dones, _ = env.step(actions)             # base action only; env adds external delta</pre>
+<p>
+  <code>env.step</code> always receives the base action. Composition happens inside
+  <code>ExternalDeltaJointPositionAction</code>.
+</p>
+
+<h3>Two observation groups at runtime</h3>
+
+<h4>Base policy (<code>policy</code> group)</h4>
+<p>Same motion-tracking layout as pre-trained base (command, anchor error, proprioception, last base action).</p>
+
+<h4>Frozen delta policy (<code>delta_policy</code> group, <code>DeltaPolicyObsCfg</code>)</h4>
+<table>
+  <thead>
+    <tr><th>Term</th><th>Source</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>base_pos_z</code> … <code>joint_vel</code></td><td>Env sensors</td><td>Same proprio/contact block as open-loop delta</td></tr>
+    <tr><td><code>actions</code></td><td><code>delta_external_actions</code></td><td>Previous frozen delta output (autoregressive channel)</td></tr>
+    <tr><td><code>current_action</code></td><td><code>delta_base_actions</code></td><td>Same-step base policy action injected by runner</td></tr>
+  </tbody>
+</table>
+<p>
+  Compared to open-loop delta obs, <code>motion_joint_action</code> is replaced by <code>current_action</code> (live base output).
+  Layout and scales otherwise match so the frozen delta checkpoint stays compatible.
+</p>
+
+<h3>Time alignment at step t</h3>
+<div class="formula">
+  Delta input at step <em>t</em>: &nbsp; (<em>δ</em><sub>t−1</sub>, &nbsp; <em>a</em><sub>base,t</sub>) &nbsp;→&nbsp; frozen policy &nbsp;→&nbsp; <em>δ</em><sub>t</sub><br>
+  Env command at step <em>t</em>: &nbsp; <em>a</em><sub>base,t</sub> + <em>δ</em><sub>t</sub> (before scale/offset)
+</div>
+
+<h3>Example Isaac command</h3>
+<pre>python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --checkpoint /path/to/finetuned_model.pt \
+  --delta_policy_checkpoint /path/to/open_loop_delta_model.pt \
+  --motion_file /path/to/walk1_subject1.npz \
+  --num_envs 4 \
+  --disable_dr \
+  --video</pre>
+
+<div class="callout">
+  <strong>Required for finetune play:</strong>
+  <code>--delta_policy_checkpoint</code> must point to the frozen open-loop delta checkpoint.
+  The finetune run's <code>params/agent.yaml</code> contains this path, but <code>play.py</code> does not auto-load it —
+  pass it explicitly unless you override via Hydra.
+</div>
+
+<h3>ONNX export after finetune play</h3>
+<p>
+  Export uses <code>ppo_runner.alg.policy</code> — the finetuned base actor — with base <code>policy</code> obs metadata.
+  The frozen delta branch is excluded. That ONNX is the deployment artifact for Genesis.
+</p>
+
+<h3>Genesis sim2sim flow (deployment-style)</h3>
+<div class="diagram">  Genesis state + reference motion from ONNX metadata
+         |
+         v
+  rebuild base policy obs (motion-tracking layout)
+         |
+         v
+  a_base = ONNX(base_obs)          # no delta branch
+         |
+         v
+  q_target = scale * a_base + offset
+         |
+         v
+  PD torques with perturbed Kp/Kd --> scene.step()</div>
+
+<div class="callout-ok">
+  <strong>Why two eval modes matter:</strong>
+  good Isaac finetune play + poor Genesis sim2sim means the base policy works in assisted source dynamics
+  but not in true target dynamics. That is the central sim2real gap Delta-A is trying to close.
+</div>
+
+<!-- ============================================================ -->
+<h2>End-to-end Delta-A pipeline</h2>
+<p>How the three evaluation modes fit the training stages:</p>
+
+<div class="diagram">  Stage 1: Train open-loop delta
+      Task: Tracking-Flat-G1-DeltaA-OpenLoop-v0
+      Eval: play.py (delta policy) --> optional Genesis (delta ONNX + motion actions)
+
+  Stage 2: Finetune base with frozen delta
+      Task: Tracking-Flat-G1-DeltaA-Finetune-v0
+      Eval: play.py (base + frozen delta in Isaac)
+
+  Stage 3: Deploy finetuned base only
+      Export: play.py ONNX (base only)
+      Eval: evaluate_sim2sim_genesis.py (base only, perturbed Kp/Kd)</div>
+
+<h2>Observation space summary</h2>
+
+<table>
+  <thead>
+    <tr><th>Obs term</th><th>Base policy</th><th>Open-loop delta</th><th>Frozen delta (finetune)</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>command</code></td><td>✓</td><td>—</td><td>—</td></tr>
+    <tr><td><code>motion_anchor_pos_b</code></td><td>✓</td><td>—</td><td>—</td></tr>
+    <tr><td><code>motion_anchor_ori_b</code></td><td>✓</td><td>—</td><td>—</td></tr>
+    <tr><td><code>base_pos_z</code></td><td>—</td><td>✓</td><td>✓</td></tr>
+    <tr><td><code>feet_contact_force</code></td><td>—</td><td>✓</td><td>✓</td></tr>
+    <tr><td><code>projected_gravity</code></td><td>—</td><td>✓</td><td>✓</td></tr>
+    <tr><td><code>joint_pos</code> / <code>joint_vel</code></td><td>✓</td><td>✓</td><td>✓</td></tr>
+    <tr><td><code>base_lin_vel</code> / <code>base_ang_vel</code></td><td>✓</td><td>✓</td><td>✓</td></tr>
+    <tr><td><code>actions</code> (history)</td><td>last base action</td><td>last delta action</td><td>last frozen delta</td></tr>
+    <tr><td><code>motion_joint_action</code></td><td>—</td><td>✓ (from NPZ)</td><td>—</td></tr>
+    <tr><td><code>current_action</code></td><td>—</td><td>—</td><td>✓ (base policy output)</td></tr>
+  </tbody>
+</table>
+
+<h2>Key source files</h2>
+<table>
+  <thead>
+    <tr><th>File</th><th>Role</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>scripts/rsl_rl/play.py</code></td><td>Isaac evaluation entry point, ONNX export, rollout loop</td></tr>
+    <tr><td><code>scripts/rsl_rl/evaluate_sim2sim_genesis.py</code></td><td>Genesis target-env evaluation from exported ONNX</td></tr>
+    <tr><td><code>utils/my_on_policy_runner.py</code></td><td>Frozen delta loading, buffer injection, finetune rollout logic</td></tr>
+    <tr><td><code>tasks/tracking/config/g1/flat_env_cfg.py</code></td><td><code>DeltaOpenLoopPolicyObsCfg</code>, <code>DeltaPolicyObsCfg</code>, env configs</td></tr>
+    <tr><td><code>tasks/tracking/mdp/observations.py</code></td><td><code>motion_joint_action</code>, <code>external_delta_action</code>, <code>current_action</code></td></tr>
+    <tr><td><code>tasks/tracking/mdp/delta_actions.py</code></td><td><code>DeltaJointPositionAction</code>, <code>ExternalDeltaJointPositionAction</code></td></tr>
+    <tr><td><code>tasks/tracking/tracking_env_cfg.py</code></td><td>Base policy observation group</td></tr>
+  </tbody>
+</table>
+
+<h2>Interpreting results</h2>
+<table>
+  <thead>
+    <tr><th>Symptom</th><th>Likely meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Good base play in Isaac, bad Genesis base eval</td>
+      <td>Sim-to-sim transfer failure under target Kp/Kd; delta-assisted training did not close the dynamics gap</td>
+    </tr>
+    <tr>
+      <td>Good open-loop delta play, bad finetune Genesis</td>
+      <td>Delta emulator works in source sim but base did not learn a deployable policy for target dynamics</td>
+    </tr>
+    <tr>
+      <td>Good finetune Isaac play, bad Genesis</td>
+      <td>Base relies on assisted dynamics; deployment without delta fails in target env</td>
+    </tr>
+    <tr>
+      <td>Finetune play fails immediately</td>
+      <td>Missing <code>--delta_policy_checkpoint</code> or obs-dim mismatch with frozen delta checkpoint</td>
+    </tr>
+    <tr>
+      <td>Open-loop play fails on motion</td>
+      <td>NPZ missing <code>action</code>/<code>actions</code> arrays</td>
+    </tr>
+  </tbody>
+</table>
+
+<footer>
+  Generated for the whole_body_tracking Delta-A sim2real pipeline.
+  Open in a browser: <code>docs/play_evaluation_workflows.html</code>
+</footer>
+
+</body>
+</html>
