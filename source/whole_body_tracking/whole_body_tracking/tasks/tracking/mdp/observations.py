@@ -111,9 +111,9 @@ def current_action(env: ManagerBasedEnv, action_buffer_name: str = "delta_base_a
 
 def feet_contact_force(env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     """Latest world-frame contact force vector on selected feet, flattened as [B, 3 * num_feet]."""
-    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name] # type: ignore
     # net_forces_w_history: [num_envs, history, num_bodies, 3]
-    net_forces_w_history = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
+    net_forces_w_history = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :] # type: ignore
     # Use the latest sample from sensor history for observation.
     feet_forces_w = net_forces_w_history[:, -1, :, :]
     return feet_forces_w.reshape(env.num_envs, -1)

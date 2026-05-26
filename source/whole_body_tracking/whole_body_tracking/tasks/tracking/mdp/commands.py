@@ -945,11 +945,11 @@ class MotionCommandCfg(CommandTermCfg):
 
     class_type: type = MotionCommand
 
-    asset_name: str = MISSING
+    asset_name: str = MISSING  # pyright: ignore[reportAssignmentType]
 
-    motion_file: str = MISSING
-    anchor_body_name: str = MISSING
-    body_names: list[str] = MISSING
+    motion_file: str = MISSING  # pyright: ignore[reportAssignmentType]
+    anchor_body_name: str = MISSING  # pyright: ignore[reportAssignmentType]
+    body_names: list[str] = MISSING  # pyright: ignore[reportAssignmentType]
 
     pose_range: dict[str, tuple[float, float]] = {}
     velocity_range: dict[str, tuple[float, float]] = {}
