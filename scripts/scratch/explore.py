@@ -1,4 +1,4 @@
-MOTION_PATH = "data/LAFAN1_Retargeting_Dataset/g1/walk1_subject1.npz"
+MOTION_PATH = "logs/sim2sim_eval/2026.06.03/model_29999_motion_dataset_20260526_174909.npz"
 import numpy as np
 
 motion = np.load(MOTION_PATH)
