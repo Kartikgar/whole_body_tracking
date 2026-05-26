@@ -128,6 +128,39 @@ parser.add_argument(
     default=True,
     help="Include in-progress (non-terminated) trajectories when saving --record_delta_model_dataset.",
 )
+parser.add_argument(
+    "--record_state_action_trajectories",
+    action="store_true",
+    default=False,
+    help=(
+        "Record robot state (joint/body world tensors) and applied actions to NPZ using padded "
+        "[num_traj, T, D] payload."
+    ),
+)
+parser.add_argument(
+    "--output_state_action_npz",
+    type=str,
+    default=None,
+    help=(
+        "Output NPZ path for --record_state_action_trajectories. "
+        "If omitted, defaults to <checkpoint_name>_state_action_<timestamp>.npz under the run directory."
+    ),
+)
+parser.add_argument(
+    "--state_action_target_trajectories",
+    type=int,
+    default=0,
+    help=(
+        "Number of completed trajectories to record for --record_state_action_trajectories. "
+        "Set <= 0 to keep recording until play loop exits."
+    ),
+)
+parser.add_argument(
+    "--state_action_include_partial",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Include in-progress (non-terminated) trajectories when saving --record_state_action_trajectories.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -170,6 +203,11 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import whole_body_tracking.tasks  # noqa: F401
 from whole_body_tracking.utils.exporter import attach_onnx_metadata, export_motion_policy_as_onnx
 from whole_body_tracking.utils.my_on_policy_runner import MotionOnPolicyRunner as OnPolicyRunner
+
+_SCRIPTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from utils import DEFAULT_STATE_ACTION_KEYS, StateActionTrajectoryRecorder  # noqa: E402
 
 ANKLE_DELTA_ACTION_JOINT_NAMES = [
     "left_ankle_pitch_joint",
@@ -673,6 +711,57 @@ def _resolve_robot_body_world_components_for_logging(env) -> dict[str, torch.Ten
     }
 
 
+def _resolve_robot_state_components_for_logging(env) -> dict[str, torch.Tensor]:
+    command_manager = getattr(env, "command_manager", None)
+    if command_manager is not None:
+        try:
+            motion_term = command_manager.get_term("motion")
+        except Exception:
+            motion_term = None
+        if motion_term is not None:
+            component_map = {
+                "joint_pos": getattr(motion_term, "robot_joint_pos", None),
+                "joint_vel": getattr(motion_term, "robot_joint_vel", None),
+                "body_pos_w": getattr(motion_term, "robot_body_pos_w", None),
+                "body_quat_w": getattr(motion_term, "robot_body_quat_w", None),
+                "body_lin_vel_w": getattr(motion_term, "robot_body_lin_vel_w", None),
+                "body_ang_vel_w": getattr(motion_term, "robot_body_ang_vel_w", None),
+            }
+            components: dict[str, torch.Tensor] = {}
+            for key, value in component_map.items():
+                if not isinstance(value, torch.Tensor):
+                    continue
+                if int(value.shape[0]) != env.num_envs:
+                    raise AssertionError(
+                        f"Expected logged robot state '{key}' batch size {env.num_envs}, got {tuple(value.shape)}."
+                    )
+                components[key] = value
+            if set(components.keys()) == set(DEFAULT_STATE_ACTION_KEYS):
+                return components
+
+    scene = getattr(env, "scene", None)
+    if scene is None or "robot" not in scene:
+        return {}
+
+    robot_data = scene["robot"].data
+    components = {
+        "joint_pos": robot_data.joint_pos,
+        "joint_vel": robot_data.joint_vel,
+    }
+    for key in ("body_pos_w", "body_quat_w", "body_lin_vel_w", "body_ang_vel_w"):
+        value = getattr(robot_data, key, None)
+        if isinstance(value, torch.Tensor):
+            components[key] = value
+    if set(components.keys()) != set(DEFAULT_STATE_ACTION_KEYS):
+        return {}
+    for key, value in components.items():
+        if int(value.shape[0]) != env.num_envs:
+            raise AssertionError(
+                f"Expected logged robot state '{key}' batch size {env.num_envs}, got {tuple(value.shape)}."
+            )
+    return components
+
+
 def _resolve_motion_command_components_for_logging(env) -> dict[str, torch.Tensor]:
     command_manager = getattr(env, "command_manager", None)
     if command_manager is None:
@@ -834,7 +923,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "video_length": args_cli.video_length,
             "disable_logger": True,
         }
-        print("[INFO] Recording videos during training.")
+        print("[INFO] Recording videos during playing.")
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
@@ -892,6 +981,38 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             )
         else:
             print(f"[INFO]: Collecting trajectories until exit into {delta_dataset_output_path}")
+
+    state_action_recorder = None
+    state_action_output_path = None
+    if args_cli.record_state_action_trajectories:
+        control_dt = _resolve_control_dt(env)
+        if control_dt <= 0.0:
+            print("[WARN]: Could not resolve control dt; using fallback fps=1.0 for state-action dataset logging.")
+            control_dt = 1.0
+        state_action_fps = 1.0 / control_dt
+        state_action_recorder = StateActionTrajectoryRecorder(
+            num_envs=env.num_envs,
+            fps=state_action_fps,
+            target_trajectories=args_cli.state_action_target_trajectories,
+        )
+        checkpoint_stem = os.path.splitext(os.path.basename(resume_path))[0]
+        default_state_action_npz = os.path.join(
+            os.path.dirname(resume_path),
+            "state_action_datasets",
+            f"{checkpoint_stem if checkpoint_stem else 'policy'}_state_action.npz",
+        )
+        requested_output = args_cli.output_state_action_npz or default_state_action_npz
+        requested_output = os.path.abspath(os.path.expanduser(requested_output))
+        run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        state_action_output_path = _append_timestamp_to_path(requested_output, run_timestamp)
+        print("[INFO]: State-action trajectory logging enabled.")
+        if state_action_recorder.target_trajectories > 0:
+            print(
+                f"[INFO]: Collecting {state_action_recorder.target_trajectories} completed trajectories into "
+                f"{state_action_output_path}"
+            )
+        else:
+            print(f"[INFO]: Collecting state-action trajectories until exit into {state_action_output_path}")
 
     # Export ONNX only for motion-command tasks, since exporter metadata expects `commands.motion`.
     if _has_motion_command(env_cfg):
@@ -965,7 +1086,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             obs, _, dones, _ = env.step(actions)
 
-            if delta_dataset_recorder is not None:
+            if state_action_recorder is not None:
+                state_components = _resolve_robot_state_components_for_logging(env.unwrapped)
+                if len(state_components) == 0:
+                    raise RuntimeError(
+                        "State-action trajectory logging is enabled but robot state tensors could not be resolved."
+                    )
+                state_action_recorder.append_step(state_components, actions)
+
+            if delta_dataset_recorder is not None or state_action_recorder is not None:
                 done_source = dones
                 termination_manager = getattr(env.unwrapped, "termination_manager", None)
                 if termination_manager is not None and hasattr(termination_manager, "terminated"):
@@ -985,6 +1114,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         pass
                 prev_motion_time_steps = current_motion_time_steps
 
+            if delta_dataset_recorder is not None:
                 gained = delta_dataset_recorder.finalize_done(done_source)
                 if gained > 0 and delta_dataset_recorder.target_trajectories > 0:
                     shown = min(delta_dataset_recorder.collected_count, delta_dataset_recorder.target_trajectories)
@@ -994,6 +1124,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     )
                 if delta_dataset_recorder.has_reached_target():
                     print("[INFO]: Reached requested delta trajectory count. Stopping play loop.")
+                    shutdown_requested_by_target = True
+                    break
+
+            if state_action_recorder is not None:
+                gained = state_action_recorder.finalize_done(done_source)
+                if gained > 0 and state_action_recorder.target_trajectories > 0:
+                    shown = min(state_action_recorder.collected_count, state_action_recorder.target_trajectories)
+                    print(
+                        f"[INFO]: Collected state-action trajectories: {shown}/"
+                        f"{state_action_recorder.target_trajectories}"
+                    )
+                if state_action_recorder.has_reached_target():
+                    print("[INFO]: Reached requested state-action trajectory count. Stopping play loop.")
                     shutdown_requested_by_target = True
                     break
         if args_cli.video:
@@ -1015,6 +1158,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 f"[INFO]: Saved delta-model dataset to {saved_path} "
                 f"(trajectories={delta_dataset_recorder.saved_count}, "
                 f"motion_length={delta_dataset_recorder.saved_motion_length})."
+            )
+
+    if state_action_recorder is not None and state_action_output_path is not None:
+        saved_path = state_action_recorder.save_dataset(
+            output_path=state_action_output_path,
+            include_partial=bool(args_cli.state_action_include_partial),
+        )
+        if saved_path is None:
+            print("[WARN]: State-action trajectory logging was enabled but no samples were collected.")
+        else:
+            print(
+                f"[INFO]: Saved state-action dataset to {saved_path} "
+                f"(trajectories={state_action_recorder.saved_count}, "
+                f"motion_length={state_action_recorder.saved_motion_length})."
             )
 
     # Clean up any externally injected action buffers.
