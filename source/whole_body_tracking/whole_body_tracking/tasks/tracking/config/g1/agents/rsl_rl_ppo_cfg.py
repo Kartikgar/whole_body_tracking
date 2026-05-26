@@ -1,13 +1,14 @@
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 
+NEXT_LAB_DATE = "2026.06.03"
 
 @configclass
 class G1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 30000
     save_interval = 500
-    experiment_name = "g1_flat"
+    experiment_name = f"{NEXT_LAB_DATE}/g1_base_policies"
     empirical_normalization = True
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
@@ -30,6 +31,9 @@ class G1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
     )
 
+class G1FlatDeltaActPPORunnerCfg(G1FlatPPORunnerCfg):
+    experiment_name = f"{NEXT_LAB_DATE}/g1_delta_policies"
+    max_iterations = 10000
 
 LOW_FREQ_SCALE = 0.5
 
@@ -45,7 +49,7 @@ class G1FlatLowFreqPPORunnerCfg(G1FlatPPORunnerCfg):
 
 @configclass
 class G1FlatDeltaAFineTunePPORunnerCfg(G1FlatPPORunnerCfg):
-    experiment_name = "g1_deltaa_finetune"
+    experiment_name = f"{NEXT_LAB_DATE}/g1_finetuned_policies"
     max_iterations = 10000
     save_interval = 500
 
