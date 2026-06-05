@@ -16,6 +16,8 @@ Example:
         --motion_file /path/to/motion.npz \
         --num_envs 64 \
         --backend cpu \
+        --policy_device cpu \
+        --seed 42 \
         --output_csv logs/sim2sim_eval/g1_genesis_eval.csv
 """
 
@@ -25,6 +27,7 @@ import argparse
 import csv
 import json
 import os
+import random
 import xml.etree.ElementTree as ET
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -42,6 +45,7 @@ try:
 except ImportError:
     tqdm = None
 
+NEXT_LAB_DATE = "2026.06.03"
 
 def _parse_csv_list(value: str | None, cast_type: Any = str) -> list[Any]:
     if value is None or value == "":
@@ -391,6 +395,10 @@ def _compute_metrics_lite(pred_pos: np.ndarray, gt_pos: np.ndarray, root_idx: in
     }
 
 
+# Kp/Kd perturbation RNG (Gaussian scale 0.27). Uses this seed only, not `--seed` / `--evaluation_seed`.
+_EVAL_KP_KD_PERTURB_RNG_SEED = 913_571
+
+
 @dataclass
 class PolicyMeta:
     joint_names: list[str]
@@ -427,11 +435,17 @@ def _parse_policy_meta(raw_meta: dict[str, str]) -> PolicyMeta:
     if len(history_lengths) != len(observation_names):
         history_lengths = [1] * len(observation_names)
 
+    # Perturbing the joint stiffness and damping by 5% for distribution shift
+    joint_stiffness_orig = np.array(_parse_csv_list(raw_meta["joint_stiffness"], float), dtype=np.float32)
+    joint_damping_orig = np.array(_parse_csv_list(raw_meta["joint_damping"], float), dtype=np.float32)
+    kp_kd_rng = np.random.default_rng(_EVAL_KP_KD_PERTURB_RNG_SEED)
+    joint_stiffness_final = joint_stiffness_orig * (1.0 + 0.27 * kp_kd_rng.standard_normal(joint_stiffness_orig.shape))
+    joint_damping_final = joint_damping_orig * (1.0 + 0.27 * kp_kd_rng.standard_normal(joint_damping_orig.shape))
     return PolicyMeta(
         joint_names=_parse_csv_list(raw_meta["joint_names"], str),
         default_joint_pos=np.array(_parse_csv_list(raw_meta["default_joint_pos"], float), dtype=np.float32),
-        joint_stiffness=np.array(_parse_csv_list(raw_meta["joint_stiffness"], float), dtype=np.float32),
-        joint_damping=np.array(_parse_csv_list(raw_meta["joint_damping"], float), dtype=np.float32),
+        joint_stiffness=joint_stiffness_final,
+        joint_damping=joint_damping_final,
         action_scale=np.array(_parse_csv_list(raw_meta["action_scale"], float), dtype=np.float32),
         observation_names=observation_names,
         observation_history_lengths=[max(int(v), 1) for v in history_lengths],
@@ -476,6 +490,19 @@ def _add_robot_entity(gs_module: Any, scene: Any, urdf_file: str | None, xml_fil
     raise ValueError("Provide either --urdf_file (recommended) or --xml_file.")
 
 
+def _apply_global_random_seeds(seed: int) -> None:
+    """Align Python / NumPy / torch RNG streams for repeatable evaluation."""
+
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+
+
 class Sim2SimEvaluatorGenesis:
     def __init__(
         self,
@@ -502,6 +529,7 @@ class Sim2SimEvaluatorGenesis:
         metric_num_envs: int,
         add_noise: bool,
         domain_randomization: bool,
+        experiment_seed: int | None = None,
     ):
         try:
             import genesis as gs
@@ -536,7 +564,10 @@ class Sim2SimEvaluatorGenesis:
             self.metric_num_envs = self.target_trajectories
         self.add_noise = bool(add_noise)
         self.domain_randomization = bool(domain_randomization)
-        self._rng = np.random.default_rng()
+        self.experiment_seed = int(experiment_seed) if experiment_seed is not None else None
+        if self.experiment_seed is not None:
+            _apply_global_random_seeds(self.experiment_seed)
+        self._rng = np.random.default_rng(self.experiment_seed)
 
         ratio = control_dt / sim_dt
         if abs(ratio - round(ratio)) > 1e-6:
@@ -558,7 +589,19 @@ class Sim2SimEvaluatorGenesis:
         available_providers = ort.get_available_providers()
         use_cuda = policy_device.startswith("cuda") and "CUDAExecutionProvider" in available_providers
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if use_cuda else ["CPUExecutionProvider"]
-        self.session = ort.InferenceSession(policy_path, providers=providers)
+        if self.experiment_seed is not None:
+            sess_opts = ort.SessionOptions()
+            sess_opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            sess_opts.enable_mem_pattern = False
+            sess_opts.enable_cpu_mem_arena = False
+            sess_opts.intra_op_num_threads = 1
+            sess_opts.inter_op_num_threads = 1
+            self.session = ort.InferenceSession(
+                policy_path, sess_options=sess_opts, providers=providers
+            )
+        else:
+            self.session = ort.InferenceSession(policy_path, providers=providers)
         input_names = [inp.name for inp in self.session.get_inputs()]
         if "obs" not in input_names:
             raise RuntimeError(f"ONNX input 'obs' not found. Inputs={input_names}")
@@ -625,7 +668,23 @@ class Sim2SimEvaluatorGenesis:
             print(f"max_steps: {self.max_steps}")
         # Genesis init
         gs_backend = gs.gpu if backend == "gpu" else gs.cpu
-        gs.init(backend=gs_backend, precision="32", logging_level="warning")
+        if self.experiment_seed is not None:
+            try:
+                gs.init(
+                    backend=gs_backend,
+                    precision="32",
+                    logging_level="warning",
+                    seed=self.experiment_seed,
+                )
+                print(f"[INFO]: Genesis gs.init seeded with evaluation_seed={self.experiment_seed}.")
+            except TypeError as exc:
+                gs.init(backend=gs_backend, precision="32", logging_level="warning")
+                print(
+                    "[WARN]: This Genesis build does not accept `seed` in gs.init(...); "
+                    f"physics RNG may not match across runs ({exc})."
+                )
+        else:
+            gs.init(backend=gs_backend, precision="32", logging_level="warning")
         rigid_options_kwargs: dict[str, Any] = {"enable_self_collision": False}
         if self.domain_randomization:
             # Genesis requires batched link/dof info for physics randomization calls.
@@ -1284,7 +1343,7 @@ class Sim2SimEvaluatorGenesis:
             cur = terms[name].astype(np.float32).reshape(batch_size, -1)
             if self.add_noise and name in OBS_NOISE_UNIFORM_RANGES:
                 n_min, n_max = OBS_NOISE_UNIFORM_RANGES[name]
-                cur = cur + np.random.uniform(n_min, n_max, size=cur.shape).astype(np.float32)
+                cur = cur + self._rng.uniform(n_min, n_max, size=cur.shape).astype(np.float32)
             self.term_history[name].append(cur)
             obs_parts.append(np.concatenate(list(self.term_history[name]), axis=1))
 
@@ -1422,7 +1481,7 @@ class Sim2SimEvaluatorGenesis:
             "termination_reason": reason,
         }
 
-    def evaluate(self, video_name: str | None = None) -> dict[str, Any]:
+    def evaluate(self, run_timestamp: str, video_name: str | None = None) -> dict[str, Any]:
         if self.cam is not None:
             self.cam.start_recording()
 
@@ -1645,7 +1704,7 @@ class Sim2SimEvaluatorGenesis:
                 break
 
         if self.cam is not None:
-            filename = video_name or "genesis_eval.mp4"
+            filename = video_name or f"logs/sim2sim_eval/{NEXT_LAB_DATE}/{run_timestamp}_genesis_eval.mp4"
             self.cam.stop_recording(save_to_filename=filename, fps=round(1.0 / self.control_dt))
         if step_pbar is not None:
             step_pbar.close()
@@ -1656,6 +1715,7 @@ class Sim2SimEvaluatorGenesis:
         motion_npz_path = self._save_motion_dataset(collected_trajectories) if record_motion_enabled else None
 
         out = {
+            "evaluation_seed": self.experiment_seed,
             "policy_path": self.policy_path,
             "motion_file": self.motion_file,
             "num_envs": self.num_envs,
@@ -1846,6 +1906,15 @@ def parse_args() -> argparse.Namespace:
         help="Apply Isaac-matching domain randomization in Genesis (default: true).",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "If set, seeds Python/NumPy/PyTorch, observation noise / domain-RNG, and Genesis (when supported). "
+            "Use together with --backend cpu --policy_device cpu for the most repeatable metrics."
+        ),
+    )
+    parser.add_argument(
         "--show_reference",
         action="store_true",
         help="Visualize reference body trajectory as white dots (one sphere per reference body).",
@@ -1884,17 +1953,23 @@ def main():
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     output_csv = None
+    output_json = None
     if effective_compute_metrics:
         output_csv = args.output_csv
         if output_csv is None:
-            output_csv = os.path.join("logs", "sim2sim_eval", f"{policy_name}_genesis_metrics.csv")
+            output_csv = os.path.join("logs", "sim2sim_eval", NEXT_LAB_DATE, f"{policy_name}_genesis_metrics.csv")
         output_csv = _append_timestamp_to_path(output_csv, run_timestamp)
+
+        output_json = args.output_json
+        if output_json is None:
+            output_json = os.path.join("logs", "sim2sim_eval", NEXT_LAB_DATE, f"{policy_name}_genesis_metrics.json")
+        output_json = _append_timestamp_to_path(output_json, run_timestamp)
 
     output_motion_npz = None
     if args.record_motion:
         output_motion_npz = args.output_motion_npz
         if output_motion_npz is None:
-            output_motion_npz = os.path.join("logs", "sim2sim_eval", f"{policy_name}_motion_dataset.npz")
+            output_motion_npz = os.path.join("logs", "sim2sim_eval", NEXT_LAB_DATE, f"{policy_name}_motion_dataset.npz")
         output_motion_npz = _append_timestamp_to_path(output_motion_npz, run_timestamp)
 
     evaluator = Sim2SimEvaluatorGenesis(
@@ -1921,21 +1996,22 @@ def main():
         metric_num_envs=effective_metric_num_envs,
         add_noise=args.add_noise,
         domain_randomization=args.domain_randomization,
+        experiment_seed=args.seed,
     )
 
-    result = evaluator.evaluate(video_name=args.video_name)
+    result = evaluator.evaluate(run_timestamp, video_name=args.video_name)
     if output_csv is not None:
         _write_csv(output_csv, result)
-    if args.output_json is not None:
-        _write_json(args.output_json, result)
+    if output_json is not None:
+        _write_json(output_json, result)
 
     print("\n=== Genesis Sim2Sim Evaluation Summary ===")
     for key in sorted(result.keys()):
         print(f"{key}: {result[key]}")
     if output_csv is not None:
         print(f"\nSaved CSV: {output_csv}")
-    if args.output_json is not None:
-        print(f"Saved JSON: {args.output_json}")
+    if output_json is not None:
+        print(f"Saved JSON: {output_json}")
     if "output_motion_npz" in result:
         print(f"Saved motion NPZ: {result['output_motion_npz']}")
 
