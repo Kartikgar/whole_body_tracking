@@ -7,6 +7,8 @@ from typing import Sequence
 
 import numpy as np
 import torch
+from isaaclab.utils.math import quat_apply, quat_inv, quat_mul, yaw_quat
+from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 
 DEFAULT_STATE_ACTION_KEYS: tuple[str, ...] = (
     "joint_pos",
@@ -188,3 +190,44 @@ class StateActionTrajectoryRecorder:
         self.saved_count = expected_num_traj
         self.saved_motion_length = motion_length
         return output_path
+
+def _bootstrap_motion_reference_startup(env: RslRlVecEnvWrapper):
+    """Hacky startup alignment for play-mode motion tasks.
+
+    `env.reset()` resamples the motion command and writes the robot/root state into sim, but
+    `MotionCommand.body_pos_relative_w/body_quat_relative_w` are still only refreshed in
+    `_update_command()`. Since terminations run before `command_manager.compute()` on the first
+    step, we manually refresh those cached relative targets once at startup.
+    """
+
+    base_env = env.unwrapped
+    command_manager = getattr(base_env, "command_manager", None)
+    if command_manager is None:
+        return
+
+    try:
+        motion_term = command_manager.get_term("motion")
+    except Exception:
+        return
+
+    env_ids = torch.arange(base_env.num_envs, dtype=torch.int64, device=base_env.device)
+    motion_term._resample_command(env_ids)
+    base_env.scene.write_data_to_sim()
+    base_env.sim.forward()
+    base_env.scene.update(dt=0.0)
+
+    anchor_pos_w_repeat = motion_term.anchor_pos_w[:, None, :].repeat(1, len(motion_term.cfg.body_names), 1)
+    heading_quat_w_repeat = motion_term.heading_quat_w[:, None, :].repeat(1, len(motion_term.cfg.body_names), 1)
+    robot_anchor_pos_w_repeat = motion_term.robot_anchor_pos_w[:, None, :].repeat(1, len(motion_term.cfg.body_names), 1)
+    robot_heading_quat_w_repeat = motion_term.robot_heading_quat_w[:, None, :].repeat(
+        1, len(motion_term.cfg.body_names), 1
+    )
+
+    delta_pos_w = robot_anchor_pos_w_repeat.clone()
+    delta_pos_w[..., 2] = anchor_pos_w_repeat[..., 2]
+    robot_heading_yaw_quat_w_repeat = yaw_quat(robot_heading_quat_w_repeat)
+    heading_yaw_quat_w_repeat = yaw_quat(heading_quat_w_repeat)
+    delta_ori_w = quat_mul(robot_heading_yaw_quat_w_repeat, quat_inv(heading_yaw_quat_w_repeat))
+
+    motion_term.body_quat_relative_w = quat_mul(delta_ori_w, motion_term.body_quat_w)
+    motion_term.body_pos_relative_w = delta_pos_w + quat_apply(delta_ori_w, motion_term.body_pos_w - anchor_pos_w_repeat)

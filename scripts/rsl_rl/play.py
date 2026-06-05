@@ -204,10 +204,7 @@ import whole_body_tracking.tasks  # noqa: F401
 from whole_body_tracking.utils.exporter import attach_onnx_metadata, export_motion_policy_as_onnx
 from whole_body_tracking.utils.my_on_policy_runner import MotionOnPolicyRunner as OnPolicyRunner
 
-_SCRIPTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
-from utils import DEFAULT_STATE_ACTION_KEYS, StateActionTrajectoryRecorder  # noqa: E402
+from utils import DEFAULT_STATE_ACTION_KEYS, StateActionTrajectoryRecorder, _bootstrap_motion_reference_startup
 
 ANKLE_DELTA_ACTION_JOINT_NAMES = [
     "left_ankle_pitch_joint",
@@ -915,10 +912,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_dir = os.path.dirname(resume_path)
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    ckpt_stem = os.path.splitext(os.path.basename(resume_path))[0]
     # wrap for video recording
     if args_cli.video:
         video_kwargs = {
-            "video_folder": os.path.join(log_dir, "videos", f"play_{timestamp}"),
+            "video_folder": os.path.join(log_dir, "videos", f"play_{timestamp}_{ckpt_stem}"),
             "step_trigger": lambda step: step == 0,
             "video_length": args_cli.video_length,
             "disable_logger": True,
@@ -1039,7 +1037,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs_split_cache: dict[str, tuple[list[str], list[int], list[str]]] = {}
     shutdown_requested_by_target = False
 
-    # reset environment
+    # Force a real env reset before the first policy step, then patch up the motion-command caches
+    # that are otherwise only refreshed after the first command-manager compute.
+    obs, _ = env.reset()
+    _bootstrap_motion_reference_startup(env)
     obs, _ = env.get_observations()
     prev_motion_time_steps = _get_motion_time_steps(env.unwrapped)
     timestep = 0
