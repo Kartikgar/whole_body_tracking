@@ -171,6 +171,23 @@ class G1FlatEnvCfg(TrackingEnvCfg):
 class G1FlatDeltaAOpenLoopEnvCfg(G1FlatEnvCfg):
     def __post_init__(self):
         super().__post_init__()
+        self.commands.motion.pose_range = {
+            "x": (0.0, 0.0),
+            "y": (0.0, 0.0),
+            "z": (0.0, 0.0),
+            "roll": (0.0, 0.0),
+            "pitch": (0.0, 0.0),
+            "yaw": (0.0, 0.0),
+        }
+        self.commands.motion.velocity_range = {
+            "x": (0.0, 0.0),
+            "y": (0.0, 0.0),
+            "z": (0.0, 0.0),
+            "roll": (0.0, 0.0),
+            "pitch": (0.0, 0.0),
+            "yaw": (0.0, 0.0),
+        }
+        self.commands.motion.joint_position_range = (0.0, 0.0)
         self.commands.motion.sample_trajectories = True
         self.commands.motion.equal_trajectory_sampling = True
         self.observations.policy = DeltaOpenLoopPolicyObsCfg()
@@ -181,6 +198,7 @@ class G1FlatDeltaAOpenLoopEnvCfg(G1FlatEnvCfg):
             use_default_offset=True,
             motion_command_name="motion",
             require_motion_action=True,
+            clip={".*": (-10.0, 10.0)},
         )
         self.actions.joint_pos.scale = G1_ACTION_SCALE
         self.commands.motion.body_names = [
@@ -219,7 +237,7 @@ class G1FlatDeltaAOpenLoopEnvCfg(G1FlatEnvCfg):
         self.rewards.motion_body_pos_global = None
         self.rewards.motion_body_ori_global = None
         self.rewards.penalty_minimal_action_norm = RewTerm(func=mdp.penalty_minimal_action_norm, weight=-0.1)
-        self.terminations.ee_body_pos = None
+        # self.terminations.ee_body_pos = None
         self.terminations.anchor_pos = None
         self.terminations.anchor_ori=None
         self.episode_length_s = 10.0
@@ -236,6 +254,7 @@ class G1FlatDeltaAFineTuneEnvCfg(G1FlatEnvCfg):
             external_action_buffer_name="delta_external_actions",
             external_action_scale=1.0,
             require_external_action=True,
+            external_delta_action_clip=(-10.0, 10.0),
         )
         self.actions.joint_pos.scale = G1_ACTION_SCALE
 
@@ -243,7 +262,7 @@ class G1FlatDeltaAFineTuneEnvCfg(G1FlatEnvCfg):
         self.rewards.penalty_minimal_action_norm = None
         self.rewards.motion_body_pos_global = None
         self.rewards.motion_body_ori_global = None
-        self.episode_length_s = 10.0
+        self.episode_length_s = 1.0
         self.terminations.ee_body_pos = None
         self.terminations.anchor_pos = None
 

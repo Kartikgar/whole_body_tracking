@@ -61,6 +61,9 @@ class DeltaJointPositionAction(JointPositionAction):
         self._raw_actions[:] = actions
         delta_actions_full = self._expand_delta_actions_to_full(self._raw_actions)
 
+        # We intend to clip "only" the delta actions, not the base actions.
+        delta_actions_full_clipped = torch.clamp(delta_actions_full, min=self._clip[:, :, 0], max=self._clip[:, :, 1])
+        del delta_actions_full
         if self._motion_command.has_joint_action:
             motion_action = self._motion_command.joint_action
             if motion_action.shape != self._processed_actions.shape:
@@ -68,19 +71,19 @@ class DeltaJointPositionAction(JointPositionAction):
                     "Motion action shape mismatch: "
                     f"expected {self._processed_actions.shape}, got {motion_action.shape}."
                 )
-            combined_actions = delta_actions_full + motion_action
+            combined_actions = delta_actions_full_clipped + motion_action
         elif self.cfg.require_motion_action:
             raise RuntimeError(
                 "DeltaJointPositionAction requires motion files with `action`/`actions` but none was found."
             )
         else:
-            combined_actions = delta_actions_full
+            combined_actions = delta_actions_full_clipped
 
         self._processed_actions = combined_actions * self._scale + self._offset
-        if self.cfg.clip is not None:
-            self._processed_actions = torch.clamp(
-                self._processed_actions, min=self._clip[:, :, 0], max=self._clip[:, :, 1]
-            )
+        # if self.cfg.clip is not None:
+        #     self._processed_actions = torch.clamp(
+        #         self._processed_actions, min=self._clip[:, :, 0], max=self._clip[:, :, 1]
+        #     )
 
 
 class DeltaComForceAction(ActionTerm):
@@ -566,6 +569,12 @@ class ExternalDeltaJointPositionAction(JointPositionAction):
     def process_actions(self, actions: torch.Tensor):
         self._raw_actions[:] = actions
         external_delta_action = self._get_external_delta_action()
+        if self.cfg.external_delta_action_clip is not None:
+            external_delta_action = torch.clamp(
+                external_delta_action, 
+                min=self.cfg.external_delta_action_clip[0], 
+                max=self.cfg.external_delta_action_clip[1]
+            )
         combined_actions = self._raw_actions + self.cfg.external_action_scale * external_delta_action
 
         self._processed_actions = combined_actions * self._scale + self._offset
@@ -625,3 +634,4 @@ class ExternalDeltaJointPositionActionCfg(JointPositionActionCfg):
     external_action_scale: float = 1.0
     require_external_action: bool = True
     external_delta_action_joint_names: list[str] | None = None
+    external_delta_action_clip: tuple[float, float] | None = None
