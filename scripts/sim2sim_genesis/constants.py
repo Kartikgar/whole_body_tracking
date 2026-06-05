@@ -93,7 +93,7 @@ G1_ALL_BODY_JOINT_NAMES: tuple[str, ...] = (
     "right_wrist_yaw_joint",
 )
 
-DEFAULT_NEXT_LAB_DATE = "2026.06.03"
+DEFAULT_NEXT_LAB_DATE = "2026.06.10"
 DEFAULT_REFERENCE_MARKER_RADIUS = 0.05
 
 # Kp/Kd perturbation uses this seed only, not `--seed` / evaluation seed.
