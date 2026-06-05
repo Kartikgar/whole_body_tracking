@@ -228,8 +228,18 @@ class GenesisSceneAdapter:
         )
         self.camera.render()
 
-    def reset_to_reference(self, reference: dict[str, np.ndarray]) -> None:
-        """Teleport the robot to the reference root pose and joint positions."""
+    def reset_to_reference(
+        self,
+        reference: dict[str, np.ndarray],
+        *,
+        rng: np.random.Generator | None = None,
+        joint_qpos_noise_range: tuple[float, float] | None = None,
+    ) -> None:
+        """Teleport the robot to the reference root pose and joint positions.
+
+        When ``joint_qpos_noise_range`` and ``rng`` are set, add independent uniform noise to
+        each actuated joint qpos entry after aligning to the reference (root pose unchanged).
+        """
 
         root_position = reference["body_pos_w"][self.root_idx]
         root_quaternion = reference["body_quat_w"][self.root_idx]
@@ -242,7 +252,28 @@ class GenesisSceneAdapter:
         for joint_index, qs_index in enumerate(self.joint_qs_indices):
             qpos[qs_index] = joint_positions[joint_index]
 
-        qpos_command = np.repeat(qpos[None, :], self.num_envs, axis=0) if self.num_envs > 1 else qpos
+        if joint_qpos_noise_range is not None:
+            if rng is None:
+                raise ValueError("joint_qpos_noise_range requires an RNG.")
+            low, high = joint_qpos_noise_range
+            if low > high:
+                raise ValueError(f"joint_qpos_noise_range low > high: {low} > {high}")
+            if self.num_envs > 1:
+                qpos_command = np.repeat(qpos[None, :], self.num_envs, axis=0).astype(np.float32)
+                for env_id in range(self.num_envs):
+                    noise = rng.uniform(low, high, size=len(self.joint_qs_indices)).astype(np.float32)
+                    for joint_index, qs_index in enumerate(self.joint_qs_indices):
+                        qpos_command[env_id, qs_index] += noise[joint_index]
+            else:
+                noise = rng.uniform(low, high, size=len(self.joint_qs_indices)).astype(np.float32)
+                for joint_index, qs_index in enumerate(self.joint_qs_indices):
+                    qpos[qs_index] += noise[joint_index]
+                qpos_command = qpos
+        elif self.num_envs > 1:
+            qpos_command = np.repeat(qpos[None, :], self.num_envs, axis=0)
+        else:
+            qpos_command = qpos
+
         self.call_genesis(self.robot.set_qpos, qpos_command)
 
         qvel_size = len(self.joint_dof_indices) + 6

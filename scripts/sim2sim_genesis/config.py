@@ -27,6 +27,8 @@ class EvalConfig:
     reference_marker_radius: float
     add_noise: bool
     domain_randomization: bool
+    randomize_startup_qpos: bool
+    startup_qpos_joint_range: tuple[float, float]
     compute_metrics: bool
     metric_num_envs: int
     record_motion: bool

@@ -32,6 +32,9 @@ DOMAIN_RAND_PUSH_VELOCITY_RANGE = {
     "yaw": (-0.78, 0.78),
 }
 
+# Uniform noise on actuated joint qpos after reset-to-reference (radians); root pose unchanged.
+DEFAULT_STARTUP_QPOS_JOINT_RANGE = (-0.10, 0.10)
+
 # Kp/Kd perturbation uses this seed only, not `--seed` / evaluation seed.
 EVAL_KP_KD_PERTURB_RNG_SEED = 913_571
 KP_KD_PERTURB_SCALE = 0.27

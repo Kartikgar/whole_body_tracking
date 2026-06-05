@@ -35,6 +35,7 @@ class Sim2SimRunner:
         metrics_evaluator: TrackingMetricsEvaluator,
         domain_randomizer: DomainRandomizer,
         trajectory_recorder: TrajectoryRecorder | None = None,
+        rng: np.random.Generator | None = None,
     ):
         """Create the rollout runner for the modular evaluator."""
 
@@ -46,6 +47,7 @@ class Sim2SimRunner:
         self.metrics_evaluator = metrics_evaluator
         self.domain_randomizer = domain_randomizer
         self.trajectory_recorder = trajectory_recorder
+        self.rng = rng if rng is not None else np.random.default_rng(config.seed)
 
         self.obs_dim_expected = self.observation_builder.compute_obs_dim(self.policy.get_obs_input_dim())
         self.start_timestep = int(config.start_timestep)
@@ -119,7 +121,14 @@ class Sim2SimRunner:
             active_rollout_index = rollout_count + 1
             reference0_batch = self.policy.reference_at(self.start_timestep, self.config.num_envs, self.obs_dim_expected)
             reference0 = self.reference_for_env(reference0_batch, env_id=0)
-            self.scene.reset_to_reference(reference0)
+            joint_qpos_noise_range = (
+                self.config.startup_qpos_joint_range if self.config.randomize_startup_qpos else None
+            )
+            self.scene.reset_to_reference(
+                reference0,
+                rng=self.rng if self.config.randomize_startup_qpos else None,
+                joint_qpos_noise_range=joint_qpos_noise_range,
+            )
             self.observation_builder.reset()
             self.domain_randomizer.reset_rollout()
             self.scene.update_reference_markers(reference0)
@@ -305,6 +314,9 @@ class Sim2SimRunner:
             "motion_file": self.config.motion_file,
             "num_envs": self.config.num_envs,
             "domain_randomization": int(self.config.domain_randomization),
+            "randomize_startup_qpos": int(self.config.randomize_startup_qpos),
+            "startup_qpos_joint_range_low": self.config.startup_qpos_joint_range[0],
+            "startup_qpos_joint_range_high": self.config.startup_qpos_joint_range[1],
             "steps": total_steps,
             "max_steps": self.max_steps,
             "start_timestep": self.start_timestep,

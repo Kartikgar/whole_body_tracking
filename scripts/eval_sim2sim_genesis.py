@@ -14,7 +14,12 @@ import numpy as np
 import torch
 
 from sim2sim_genesis.config import EvalConfig, OutputTargets
-from sim2sim_genesis.constants import DEFAULT_G1_URDF, DEFAULT_NEXT_LAB_DATE, DEFAULT_REFERENCE_MARKER_RADIUS
+from sim2sim_genesis.constants import (
+    DEFAULT_G1_URDF,
+    DEFAULT_NEXT_LAB_DATE,
+    DEFAULT_REFERENCE_MARKER_RADIUS,
+    DEFAULT_STARTUP_QPOS_JOINT_RANGE,
+)
 from sim2sim_genesis.control import PdController
 from sim2sim_genesis.domain_randomization import DomainRandomizer
 from sim2sim_genesis.metrics import TrackingMetricsEvaluator
@@ -115,6 +120,26 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Apply Isaac-matching domain randomization in Genesis.",
     )
+    parser.add_argument(
+        "--randomize_startup_qpos",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "After reset-to-reference, add uniform noise to actuated joint qpos in simulation "
+            "(separate from domain randomization)."
+        ),
+    )
+    parser.add_argument(
+        "--startup_qpos_joint_range",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("LOW", "HIGH"),
+        help=(
+            "Uniform joint qpos noise range in radians when --randomize_startup_qpos is enabled. "
+            f"Default: {DEFAULT_STARTUP_QPOS_JOINT_RANGE[0]} {DEFAULT_STARTUP_QPOS_JOINT_RANGE[1]}."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=None, help="Optional global seed for evaluation.")
     parser.add_argument("--show_reference", action="store_true", help="Visualize reference body markers.")
     parser.add_argument(
@@ -143,6 +168,10 @@ def validate_inputs(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"XML file not found: {args.xml_file}")
     if args.motion_file is not None and not os.path.isfile(args.motion_file):
         raise FileNotFoundError(f"Motion file not found: {args.motion_file}")
+    if args.startup_qpos_joint_range is not None:
+        low, high = args.startup_qpos_joint_range
+        if low > high:
+            raise ValueError(f"--startup_qpos_joint_range low must be <= high. Got {low} > {high}.")
 
 
 def resolve_output_targets(args: argparse.Namespace, run_timestamp: str, policy_name: str) -> OutputTargets:
@@ -184,6 +213,12 @@ def build_eval_config(args: argparse.Namespace, outputs: OutputTargets) -> EvalC
     if effective_compute_metrics and effective_metric_num_envs <= 0:
         raise ValueError(f"--metric_num_envs must be > 0. Got {effective_metric_num_envs}")
 
+    startup_qpos_joint_range = (
+        tuple(args.startup_qpos_joint_range)
+        if args.startup_qpos_joint_range is not None
+        else DEFAULT_STARTUP_QPOS_JOINT_RANGE
+    )
+
     return EvalConfig(
         policy_path=args.policy_path,
         urdf_file=args.urdf_file,
@@ -203,6 +238,8 @@ def build_eval_config(args: argparse.Namespace, outputs: OutputTargets) -> EvalC
         reference_marker_radius=float(args.reference_marker_radius),
         add_noise=bool(args.add_noise),
         domain_randomization=bool(args.domain_randomization),
+        randomize_startup_qpos=bool(args.randomize_startup_qpos),
+        startup_qpos_joint_range=startup_qpos_joint_range,
         compute_metrics=effective_compute_metrics,
         metric_num_envs=max(int(effective_metric_num_envs), 1),
         record_motion=bool(args.record_motion),
@@ -283,6 +320,7 @@ def build_runner(config: EvalConfig) -> Sim2SimRunner:
         metrics_evaluator=metrics_evaluator,
         domain_randomizer=domain_randomizer,
         trajectory_recorder=trajectory_recorder,
+        rng=rng,
     )
 
 
