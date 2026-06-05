@@ -31,9 +31,11 @@ class G1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
     )
 
+@configclass
 class G1FlatDeltaActPPORunnerCfg(G1FlatPPORunnerCfg):
     experiment_name = f"{NEXT_LAB_DATE}/g1_delta_policies"
     max_iterations = 10000
+    save_interval = 100
 
 LOW_FREQ_SCALE = 0.5
 
@@ -51,7 +53,7 @@ class G1FlatLowFreqPPORunnerCfg(G1FlatPPORunnerCfg):
 class G1FlatDeltaAFineTunePPORunnerCfg(G1FlatPPORunnerCfg):
     experiment_name = f"{NEXT_LAB_DATE}/g1_finetuned_policies"
     max_iterations = 10000
-    save_interval = 500
+    save_interval = 100
 
     # Frozen open-loop delta policy checkpoint used to inject delta actions during rollout.
     delta_policy_checkpoint: str | None = None
