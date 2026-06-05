@@ -37,18 +37,18 @@ from matplotlib.patches import Patch
 BAND_ALPHA = 0.28
 MEAN_LW = 2.0
 
-DEFAULT_ACTION_KEYS = ("actions", "obs_motion_joint_action", "motion_joint_action")
+DEFAULT_ACTION_KEYS = ("actions", "motion_joint_action")
 DEFAULT_JOINT_KEYS = ("obs_joint_pos", "motion_joint_pos")
 
 ACTION_SERIES = {
-    "actions": ("#2563eb", "actions (policy output)"),
-    "obs_motion_joint_action": ("#ea580c", "obs_motion_joint_action"),
-    "motion_joint_action": ("#16a34a", "motion_joint_action (reference)"),
+    "actions": ("#2563eb", "Delta Action (policy output)"),
+    # "obs_motion_joint_action": ("#ea580c", "obs_motion_joint_action"),
+    "motion_joint_action": ("#16a34a", "Base Action"),
 }
 
 JOINT_SERIES = {
-    "obs_joint_pos": ("#7c3aed", "obs_joint_pos (robot relative)"),
-    "motion_joint_pos": ("#0d9488", "motion_joint_pos (reference relative)"),
+    "obs_joint_pos": ("#7c3aed", "Observed Joint Pos (robot relative)"),
+    "motion_joint_pos": ("#0d9488", "Target Joint Pos (reference relative)"),
 }
 
 
@@ -58,6 +58,7 @@ class SeriesSpec:
     label: str
     color: str
     data: np.ndarray
+    valid_lengths: np.ndarray
 
 
 def _parse_step_range(text: str) -> tuple[int, int | None]:
@@ -78,7 +79,7 @@ def _load_3d_array(
     key: str,
     step_start: int,
     step_end: int | None,
-) -> tuple[np.ndarray, int]:
+) -> tuple[np.ndarray, int, np.ndarray]:
     with np.load(npz_path) as data:
         if key not in data.files:
             raise KeyError(f"Key {key!r} not found in {npz_path}. Available keys: {sorted(data.files)}")
@@ -90,7 +91,42 @@ def _load_3d_array(
     end = total_steps if step_end is None else min(step_end, total_steps)
     if step_start >= end:
         raise ValueError(f"Invalid step slice [{step_start}:{end}] for trajectory length {total_steps}.")
-    return array[:, step_start:end, :], num_traj
+    valid_lengths = _infer_valid_lengths(array)
+    valid_lengths = np.clip(valid_lengths - step_start, 0, end - step_start)
+    return array[:, step_start:end, :], num_traj, valid_lengths
+
+
+def _infer_valid_lengths(data: np.ndarray, *, atol: float = 1.0e-8, rtol: float = 1.0e-8) -> np.ndarray:
+    if data.ndim != 3:
+        raise ValueError(f"Expected 3D array [num_traj, T, D], got {data.shape}.")
+    num_traj, total_steps, _ = data.shape
+    lengths = np.ones(num_traj, dtype=np.int32)
+    for traj_idx in range(num_traj):
+        traj = data[traj_idx]
+        last_change = 0
+        for step_idx in range(1, total_steps):
+            if not np.allclose(traj[step_idx], traj[step_idx - 1], atol=atol, rtol=rtol):
+                last_change = step_idx
+        lengths[traj_idx] = last_change + 1
+    return lengths
+
+
+def _masked_stats(data: np.ndarray, valid_lengths: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if data.ndim != 3:
+        raise ValueError(f"Expected 3D array [num_traj, T, D], got {data.shape}.")
+    if valid_lengths.ndim != 1 or valid_lengths.shape[0] != data.shape[0]:
+        raise ValueError(
+            f"Expected valid_lengths shape ({data.shape[0]},), got {tuple(valid_lengths.shape)}."
+        )
+
+    num_steps = data.shape[1]
+    step_ids = np.arange(num_steps, dtype=np.int32)
+    valid_mask = step_ids[None, :] < valid_lengths[:, None]
+    masked = np.where(valid_mask[:, :, None], data, np.nan)
+    mean = np.nanmean(masked, axis=0)
+    min_vals = np.nanmin(masked, axis=0)
+    max_vals = np.nanmax(masked, axis=0)
+    return mean, min_vals, max_vals
 
 
 def _load_series_specs(
@@ -103,7 +139,7 @@ def _load_series_specs(
     specs: list[SeriesSpec] = []
     num_traj: int | None = None
     for key in keys:
-        data, traj_count = _load_3d_array(npz_path, key, step_start, step_end)
+        data, traj_count, valid_lengths = _load_3d_array(npz_path, key, step_start, step_end)
         if num_traj is None:
             num_traj = traj_count
         elif num_traj != traj_count:
@@ -113,7 +149,7 @@ def _load_series_specs(
                 f"Shape mismatch for key {key!r}: expected {specs[0].data.shape}, got {data.shape}."
             )
         color, label = palette[key]
-        specs.append(SeriesSpec(key=key, label=label, color=color, data=data))
+        specs.append(SeriesSpec(key=key, label=label, color=color, data=data, valid_lengths=valid_lengths))
     if num_traj is None:
         raise ValueError("No series loaded.")
     return specs, num_traj
@@ -146,25 +182,29 @@ def plot_multi_series_aggregate(
 
     ylim = None
     if share_y:
-        global_min = min(float(spec.data.min()) for spec in series_specs)
-        global_max = max(float(spec.data.max()) for spec in series_specs)
-        pad = 0.05 * max(global_max - global_min, 1e-6)
-        ylim = (global_min - pad, global_max + pad)
+        finite_chunks: list[np.ndarray] = []
+        for spec in series_specs:
+            _, min_vals, max_vals = _masked_stats(spec.data, spec.valid_lengths)
+            finite_chunks.append(min_vals[np.isfinite(min_vals)].reshape(-1))
+            finite_chunks.append(max_vals[np.isfinite(max_vals)].reshape(-1))
+        finite = np.concatenate([chunk for chunk in finite_chunks if chunk.size > 0]) if finite_chunks else np.array([])
+        if finite.size > 0:
+            pad = 0.05 * max(float(finite.max() - finite.min()), 1e-6)
+            ylim = (float(finite.min()) - pad, float(finite.max()) + pad)
 
     for dim in range(num_dims):
         ax = axes_flat[dim]
         for spec in series_specs:
-            traj = spec.data[:, :, dim]
-            mean = traj.mean(axis=0)
+            mean, min_vals, max_vals = _masked_stats(spec.data, spec.valid_lengths)
             ax.fill_between(
                 steps,
-                traj.min(axis=0),
-                traj.max(axis=0),
+                min_vals[:, dim],
+                max_vals[:, dim],
                 color=spec.color,
                 alpha=BAND_ALPHA,
                 linewidth=0,
             )
-            ax.plot(steps, mean, color=spec.color, linewidth=MEAN_LW)
+            ax.plot(steps, mean[:, dim], color=spec.color, linewidth=MEAN_LW)
         ax.set_title(f"dof {dim}", fontsize=9, pad=2)
         ax.grid(True, color="#e8e8e8", linewidth=0.6)
         ax.tick_params(labelsize=7)
@@ -177,9 +217,11 @@ def plot_multi_series_aggregate(
     step_end = step_start + num_steps
     fig.supxlabel("Step", fontsize=11)
     fig.supylabel(ylabel, fontsize=11)
+    valid_min = min(int(spec.valid_lengths.min()) for spec in series_specs)
+    valid_max = max(int(spec.valid_lengths.max()) for spec in series_specs)
     fig.suptitle(
         f"{title_prefix} — all DOFs (steps {step_start}–{step_end - 1})\n"
-        f"{num_traj} trajectories",
+        f"{num_traj} trajectories, valid lengths across series: {valid_min}–{valid_max}",
         fontsize=13,
         y=0.995,
     )
@@ -320,7 +362,13 @@ def main(argv: list[str] | None = None) -> int:
                 if spec.key == "motion_joint_pos":
                     data = to_relative_joint_pos(data, default_joint_pos)
                 converted_specs.append(
-                    SeriesSpec(key=spec.key, label=spec.label, color=spec.color, data=data)
+                    SeriesSpec(
+                        key=spec.key,
+                        label=spec.label,
+                        color=spec.color,
+                        data=data,
+                        valid_lengths=spec.valid_lengths,
+                    )
                 )
 
             joint_output = (args.joint_pos_output or _default_joint_pos_output(npz_path)).expanduser().resolve()

@@ -54,7 +54,7 @@ def _load_series(
     key: str,
     step_start: int,
     step_end: int | None,
-) -> tuple[np.ndarray, float | None]:
+) -> tuple[np.ndarray, float | None, np.ndarray]:
     with np.load(npz_path) as data:
         if key not in data.files:
             raise KeyError(f"Key {key!r} not found in {npz_path}. Available keys: {sorted(data.files)}")
@@ -67,12 +67,55 @@ def _load_series(
     end = total_steps if step_end is None else min(step_end, total_steps)
     if step_start >= end:
         raise ValueError(f"Invalid step slice [{step_start}:{end}] for trajectory length {total_steps}.")
-    return series[:, step_start:end, :], fps
+    valid_lengths = _infer_valid_lengths(series)
+    valid_lengths = np.clip(valid_lengths - step_start, 0, end - step_start)
+    return series[:, step_start:end, :], fps, valid_lengths
+
+
+def _infer_valid_lengths(data: np.ndarray, *, atol: float = 1.0e-8, rtol: float = 1.0e-8) -> np.ndarray:
+    """Infer per-trajectory valid lengths by dropping trailing constant-value padding.
+
+    Recorder padding repeats the final valid frame to the rollout max length. We keep a
+    trajectory active until the last timestep whose value differs from its predecessor.
+    """
+
+    if data.ndim != 3:
+        raise ValueError(f"Expected 3D array [num_traj, T, D], got {data.shape}.")
+    num_traj, total_steps, _ = data.shape
+    lengths = np.ones(num_traj, dtype=np.int32)
+    for traj_idx in range(num_traj):
+        traj = data[traj_idx]
+        last_change = 0
+        for step_idx in range(1, total_steps):
+            if not np.allclose(traj[step_idx], traj[step_idx - 1], atol=atol, rtol=rtol):
+                last_change = step_idx
+        lengths[traj_idx] = last_change + 1
+    return lengths
+
+
+def _masked_stats(data: np.ndarray, valid_lengths: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if data.ndim != 3:
+        raise ValueError(f"Expected 3D array [num_traj, T, D], got {data.shape}.")
+    if valid_lengths.ndim != 1 or valid_lengths.shape[0] != data.shape[0]:
+        raise ValueError(
+            f"Expected valid_lengths shape ({data.shape[0]},), got {tuple(valid_lengths.shape)}."
+        )
+
+    num_traj, num_steps, _ = data.shape
+    step_ids = np.arange(num_steps, dtype=np.int32)
+    valid_mask = step_ids[None, :] < valid_lengths[:, None]
+    masked = np.where(valid_mask[:, :, None], data, np.nan)
+    mean = np.nanmean(masked, axis=0)
+    min_vals = np.nanmin(masked, axis=0)
+    max_vals = np.nanmax(masked, axis=0)
+    counts = valid_mask.sum(axis=0).astype(np.int32)
+    return mean, min_vals, max_vals, counts
 
 
 def plot_aggregate_series(
     data: np.ndarray,
     *,
+    valid_lengths: np.ndarray,
     output_path: Path,
     step_start: int,
     ylabel: str,
@@ -85,6 +128,7 @@ def plot_aggregate_series(
     num_traj, num_steps, num_dims = data.shape
     steps = np.arange(step_start, step_start + num_steps)
     nrows = int(np.ceil(num_dims / ncols))
+    mean, min_vals, max_vals, valid_counts = _masked_stats(data, valid_lengths)
 
     fig, axes = plt.subplots(nrows, ncols, figsize=(2.8 * ncols, 2.4 * nrows), dpi=dpi, sharex=True)
     fig.patch.set_facecolor("white")
@@ -92,15 +136,20 @@ def plot_aggregate_series(
 
     ylim = None
     if share_y:
-        pad = 0.05 * max(float(data.max() - data.min()), 1e-6)
-        ylim = (float(data.min()) - pad, float(data.max()) + pad)
+        finite = np.concatenate(
+            [min_vals[np.isfinite(min_vals)].reshape(-1), max_vals[np.isfinite(max_vals)].reshape(-1)]
+        )
+        if finite.size > 0:
+            pad = 0.05 * max(float(finite.max() - finite.min()), 1e-6)
+            ylim = (float(finite.min()) - pad, float(finite.max()) + pad)
 
     for dim in range(num_dims):
         ax = axes_flat[dim]
-        traj = data[:, :, dim]
-        mean = traj.mean(axis=0)
-        ax.fill_between(steps, traj.min(axis=0), traj.max(axis=0), color=SERIES_COLOR, alpha=BAND_ALPHA, linewidth=0)
-        ax.plot(steps, mean, color=SERIES_COLOR, linewidth=MEAN_LW)
+        dim_mean = mean[:, dim]
+        dim_min = min_vals[:, dim]
+        dim_max = max_vals[:, dim]
+        ax.fill_between(steps, dim_min, dim_max, color=SERIES_COLOR, alpha=BAND_ALPHA, linewidth=0)
+        ax.plot(steps, dim_mean, color=SERIES_COLOR, linewidth=MEAN_LW)
         if dim_labels is not None and dim < len(dim_labels):
             ax.set_title(dim_labels[dim], fontsize=8, pad=2)
         else:
@@ -116,9 +165,11 @@ def plot_aggregate_series(
     step_end = step_start + num_steps
     fig.supxlabel("Step", fontsize=11)
     fig.supylabel(ylabel, fontsize=11)
+    valid_min = int(valid_counts.min()) if valid_counts.size > 0 else 0
+    valid_max = int(valid_counts.max()) if valid_counts.size > 0 else 0
     fig.suptitle(
         f"{title_prefix} — all DOFs (steps {step_start}–{step_end - 1})\n"
-        f"{num_traj} trajectories",
+        f"{num_traj} trajectories, valid per step: {valid_min}–{valid_max}",
         fontsize=13,
         y=0.995,
     )
@@ -220,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     saved_paths: list[Path] = []
     for key in args.keys:
         try:
-            data, fps = _load_series(npz_path, key, step_start, step_end)
+            data, fps, valid_lengths = _load_series(npz_path, key, step_start, step_end)
         except (KeyError, ValueError) as exc:
             print(f"[ERROR] {exc}", file=sys.stderr)
             return 1
@@ -239,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
         output_path = output_dir / _default_output_path(npz_path, key, joint_pos_space=args.joint_pos_space).name
         saved = plot_aggregate_series(
             data,
+            valid_lengths=valid_lengths,
             output_path=output_path,
             step_start=step_start,
             ylabel=_ylabel_for_key(key, joint_pos_space=args.joint_pos_space),
@@ -250,13 +302,16 @@ def main(argv: list[str] | None = None) -> int:
         saved_paths.append(saved)
         num_traj, num_steps, num_dims = data.shape
         fps_text = f", fps={fps:.3f}" if fps is not None else ""
+        valid_min = int(valid_lengths.min()) if valid_lengths.size > 0 else 0
+        valid_max = int(valid_lengths.max()) if valid_lengths.size > 0 else 0
         space_text = ""
         if key == "joint_pos":
             space_text = f", space={args.joint_pos_space}"
             if args.joint_pos_space == "relative" and default_joint_pos_source is not None:
                 space_text += f", default_from={default_joint_pos_source.name}"
         print(
-            f"[INFO] {key}: trajectories={num_traj}, steps={num_steps}, dims={num_dims}{fps_text}{space_text} "
+            f"[INFO] {key}: trajectories={num_traj}, steps={num_steps}, dims={num_dims}, "
+            f"valid_lengths={valid_min}-{valid_max}{fps_text}{space_text} "
             f"-> {saved}"
         )
 
