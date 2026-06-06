@@ -8,7 +8,8 @@ Expects NPZ output from ``play.py --record_delta_model_dataset`` on a
 - ``obs_joint_pos`` stores relative joint-position observation terms
 
 Each action subplot shows mean and min-max across trajectories for base (blue) and
-delta (orange), plus composed mean ``base + delta`` as a green dotted line.
+delta (orange). Optionally overlay composed mean ``base + delta`` as a green dotted
+line via ``--plot-composed-mean``.
 ``obs_joint_pos`` is plotted separately as a single-series mean/min-max grid.
 
 .. code-block:: bash
@@ -77,7 +78,7 @@ def _load_3d_array(
     key: str,
     step_start: int,
     step_end: int | None,
-) -> tuple[np.ndarray, int]:
+) -> tuple[np.ndarray, int, np.ndarray]:
     with np.load(npz_path) as data:
         if key not in data.files:
             raise KeyError(f"Key {key!r} not found in {npz_path}. Available keys: {sorted(data.files)}")
@@ -86,11 +87,51 @@ def _load_3d_array(
     if array.ndim != 3:
         raise ValueError(f"Expected 3D array [num_traj, T, D] for key {key!r}; got {array.shape}.")
 
-    num_traj, total_steps, num_dims = array.shape
+    num_traj, total_steps, _ = array.shape
     end = total_steps if step_end is None else min(step_end, total_steps)
     if step_start >= end:
         raise ValueError(f"Invalid step slice [{step_start}:{end}] for trajectory length {total_steps}.")
-    return array[:, step_start:end, :], num_traj
+    valid_lengths = _infer_valid_lengths(array)
+    valid_lengths = np.clip(valid_lengths - step_start, 0, end - step_start)
+    return array[:, step_start:end, :], num_traj, valid_lengths
+
+
+def _infer_valid_lengths(data: np.ndarray, *, atol: float = 1.0e-8, rtol: float = 1.0e-8) -> np.ndarray:
+    """Infer per-trajectory valid lengths by dropping trailing constant-value padding.
+
+    Recorder padding repeats the final valid frame to the rollout max length. We keep a
+    frame as valid while any dimension changes from the previous timestep.
+    """
+    if data.ndim != 3:
+        raise ValueError(f"Expected 3D array [num_traj, T, D], got {data.shape}.")
+    num_traj, total_steps, _ = data.shape
+    lengths = np.ones(num_traj, dtype=np.int32)
+    for traj_idx in range(num_traj):
+        traj = data[traj_idx]
+        last_change = 0
+        for step_idx in range(1, total_steps):
+            if not np.allclose(traj[step_idx], traj[step_idx - 1], atol=atol, rtol=rtol):
+                last_change = step_idx
+        lengths[traj_idx] = last_change + 1
+    return lengths
+
+
+def _masked_stats(data: np.ndarray, valid_lengths: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if data.ndim != 3:
+        raise ValueError(f"Expected 3D array [num_traj, T, D], got {data.shape}.")
+    if valid_lengths.ndim != 1 or valid_lengths.shape[0] != data.shape[0]:
+        raise ValueError(
+            f"Expected valid_lengths shape ({data.shape[0]},), got {tuple(valid_lengths.shape)}."
+        )
+
+    num_steps = data.shape[1]
+    step_ids = np.arange(num_steps, dtype=np.int32)
+    valid_mask = step_ids[None, :] < valid_lengths[:, None]
+    masked = np.where(valid_mask[:, :, None], data, np.nan)
+    mean = np.nanmean(masked, axis=0)
+    min_vals = np.nanmin(masked, axis=0)
+    max_vals = np.nanmax(masked, axis=0)
+    return mean, min_vals, max_vals
 
 
 def _load_action_arrays(
@@ -99,14 +140,14 @@ def _load_action_arrays(
     delta_key: str,
     step_start: int,
     step_end: int | None,
-) -> tuple[np.ndarray, np.ndarray, int]:
-    base, num_traj = _load_3d_array(npz_path, base_key, step_start, step_end)
-    delta, delta_num_traj = _load_3d_array(npz_path, delta_key, step_start, step_end)
+) -> tuple[np.ndarray, np.ndarray, int, np.ndarray, np.ndarray]:
+    base, num_traj, base_valid_lengths = _load_3d_array(npz_path, base_key, step_start, step_end)
+    delta, delta_num_traj, delta_valid_lengths = _load_3d_array(npz_path, delta_key, step_start, step_end)
     if num_traj != delta_num_traj:
         raise ValueError(f"Trajectory count mismatch: base={num_traj}, delta={delta_num_traj}.")
     if base.shape != delta.shape:
         raise ValueError(f"Base/delta shape mismatch: base={base.shape}, delta={delta.shape}.")
-    return base, delta, num_traj
+    return base, delta, num_traj, base_valid_lengths, delta_valid_lengths
 
 
 def plot_combined_actions(
@@ -116,7 +157,10 @@ def plot_combined_actions(
     output_path: Path,
     step_start: int,
     num_traj: int,
+    base_valid_lengths: np.ndarray,
+    delta_valid_lengths: np.ndarray,
     share_y: bool = False,
+    plot_composed_mean: bool = False,
     ncols: int = 6,
     dpi: int = 150,
     title_prefix: str | None = None,
@@ -125,6 +169,12 @@ def plot_combined_actions(
     num_traj_data, num_steps, num_dims = base.shape
     if num_traj_data != num_traj:
         raise ValueError("num_traj argument does not match data.")
+
+    composed_valid_lengths = None
+    composed = None
+    if plot_composed_mean:
+        composed_valid_lengths = np.minimum(base_valid_lengths, delta_valid_lengths)
+        composed = base + delta
 
     steps = np.arange(step_start, step_start + num_steps)
     nrows = int(np.ceil(num_dims / ncols))
@@ -135,37 +185,52 @@ def plot_combined_actions(
 
     ylim = None
     if share_y:
-        pad = 0.05 * max(base.max() - base.min(), delta.max() - delta.min(), 1e-6)
-        ylim = (min(base.min(), delta.min()) - pad, max(base.max(), delta.max()) + pad)
+        finite_chunks: list[np.ndarray] = []
+        series_specs: list[tuple[np.ndarray, np.ndarray]] = [
+            (base, base_valid_lengths),
+            (delta, delta_valid_lengths),
+        ]
+        if plot_composed_mean and composed is not None and composed_valid_lengths is not None:
+            series_specs.append((composed, composed_valid_lengths))
+        for data, valid_lengths in series_specs:
+            _, min_vals, max_vals = _masked_stats(data, valid_lengths)
+            finite_chunks.append(min_vals[np.isfinite(min_vals)].reshape(-1))
+            finite_chunks.append(max_vals[np.isfinite(max_vals)].reshape(-1))
+        finite = np.concatenate([chunk for chunk in finite_chunks if chunk.size > 0]) if finite_chunks else np.array([])
+        if finite.size > 0:
+            pad = 0.05 * max(float(finite.max() - finite.min()), 1e-6)
+            ylim = (float(finite.min()) - pad, float(finite.max()) + pad)
+
+    base_mean, base_min, base_max = _masked_stats(base, base_valid_lengths)
+    delta_mean, delta_min, delta_max = _masked_stats(delta, delta_valid_lengths)
+    composed_mean = None
+    if plot_composed_mean and composed is not None and composed_valid_lengths is not None:
+        composed_mean, _, _ = _masked_stats(composed, composed_valid_lengths)
 
     for dim in range(num_dims):
         ax = axes_flat[dim]
-        base_traj = base[:, :, dim]
-        delta_traj = delta[:, :, dim]
-        base_mean = base_traj.mean(axis=0)
-        delta_mean = delta_traj.mean(axis=0)
-        composed_mean = base_mean + delta_mean
 
         ax.fill_between(
             steps,
-            base_traj.min(axis=0),
-            base_traj.max(axis=0),
+            base_min[:, dim],
+            base_max[:, dim],
             color=BASE_COLOR,
             alpha=BAND_ALPHA,
             linewidth=0,
         )
-        ax.plot(steps, base_mean, color=BASE_COLOR, linewidth=MEAN_LW)
+        ax.plot(steps, base_mean[:, dim], color=BASE_COLOR, linewidth=MEAN_LW)
 
         ax.fill_between(
             steps,
-            delta_traj.min(axis=0),
-            delta_traj.max(axis=0),
+            delta_min[:, dim],
+            delta_max[:, dim],
             color=DELTA_COLOR,
             alpha=BAND_ALPHA,
             linewidth=0,
         )
-        ax.plot(steps, delta_mean, color=DELTA_COLOR, linewidth=MEAN_LW)
-        ax.plot(steps, composed_mean, color=COMPOSED_COLOR, linewidth=MEAN_LW, linestyle=":")
+        ax.plot(steps, delta_mean[:, dim], color=DELTA_COLOR, linewidth=MEAN_LW)
+        if composed_mean is not None:
+            ax.plot(steps, composed_mean[:, dim], color=COMPOSED_COLOR, linewidth=MEAN_LW, linestyle=":")
 
         if dim_labels is not None and dim < len(dim_labels):
             ax.set_title(dim_labels[dim], fontsize=8, pad=2)
@@ -180,12 +245,24 @@ def plot_combined_actions(
         axes_flat[idx].axis("off")
 
     step_end = step_start + num_steps
-    prefix = title_prefix or "Base + delta + composed actions"
+    if title_prefix is not None:
+        prefix = title_prefix
+    elif plot_composed_mean:
+        prefix = "Base + delta + composed actions"
+    else:
+        prefix = "Base + delta actions"
+    valid_mins = [int(base_valid_lengths.min()), int(delta_valid_lengths.min())]
+    valid_maxs = [int(base_valid_lengths.max()), int(delta_valid_lengths.max())]
+    if plot_composed_mean and composed_valid_lengths is not None:
+        valid_mins.append(int(composed_valid_lengths.min()))
+        valid_maxs.append(int(composed_valid_lengths.max()))
+    valid_min = min(valid_mins)
+    valid_max = max(valid_maxs)
     fig.supxlabel("Step", fontsize=11)
     fig.supylabel("Action", fontsize=11)
     fig.suptitle(
         f"{prefix} — all dimensions (steps {step_start}–{step_end - 1})\n"
-        f"{num_traj} trajectories",
+        f"{num_traj} trajectories, valid lengths: {valid_min}–{valid_max}",
         fontsize=13,
         y=0.995,
     )
@@ -195,9 +272,26 @@ def plot_combined_actions(
         Patch(facecolor=BASE_COLOR, edgecolor="none", alpha=BAND_ALPHA, label="Base min–max"),
         Line2D([0], [0], color=DELTA_COLOR, linewidth=MEAN_LW, label="Delta mean"),
         Patch(facecolor=DELTA_COLOR, edgecolor="none", alpha=BAND_ALPHA, label="Delta min–max"),
-        Line2D([0], [0], color=COMPOSED_COLOR, linewidth=MEAN_LW, linestyle=":", label="Composed mean (base + delta)"),
     ]
-    fig.legend(handles=legend_handles, loc="upper center", bbox_to_anchor=(0.5, 0.965), ncol=5, framealpha=0.95, fontsize=9)
+    if plot_composed_mean:
+        legend_handles.append(
+            Line2D(
+                [0],
+                [0],
+                color=COMPOSED_COLOR,
+                linewidth=MEAN_LW,
+                linestyle=":",
+                label="Composed mean (base + delta)",
+            )
+        )
+    fig.legend(
+        handles=legend_handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.965),
+        ncol=len(legend_handles),
+        framealpha=0.95,
+        fontsize=9,
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout(rect=[0, 0, 1, 0.94])
@@ -212,6 +306,7 @@ def plot_aggregate_series(
     output_path: Path,
     step_start: int,
     num_traj: int,
+    valid_lengths: np.ndarray,
     series_color: str,
     ylabel: str,
     title_prefix: str,
@@ -233,15 +328,29 @@ def plot_aggregate_series(
 
     ylim = None
     if share_y:
-        pad = 0.05 * max(float(data.max() - data.min()), 1e-6)
-        ylim = (float(data.min()) - pad, float(data.max()) + pad)
+        _, min_vals, max_vals = _masked_stats(data, valid_lengths)
+        finite = np.concatenate(
+            [
+                min_vals[np.isfinite(min_vals)].reshape(-1),
+                max_vals[np.isfinite(max_vals)].reshape(-1),
+            ]
+        )
+        if finite.size > 0:
+            pad = 0.05 * max(float(finite.max() - finite.min()), 1e-6)
+            ylim = (float(finite.min()) - pad, float(finite.max()) + pad)
 
     for dim in range(num_dims):
         ax = axes_flat[dim]
-        traj = data[:, :, dim]
-        mean = traj.mean(axis=0)
-        ax.fill_between(steps, traj.min(axis=0), traj.max(axis=0), color=series_color, alpha=BAND_ALPHA, linewidth=0)
-        ax.plot(steps, mean, color=series_color, linewidth=MEAN_LW)
+        mean, min_vals, max_vals = _masked_stats(data, valid_lengths)
+        ax.fill_between(
+            steps,
+            min_vals[:, dim],
+            max_vals[:, dim],
+            color=series_color,
+            alpha=BAND_ALPHA,
+            linewidth=0,
+        )
+        ax.plot(steps, mean[:, dim], color=series_color, linewidth=MEAN_LW)
         if dim_labels is not None and dim < len(dim_labels):
             ax.set_title(dim_labels[dim], fontsize=8, pad=2)
         else:
@@ -255,11 +364,13 @@ def plot_aggregate_series(
         axes_flat[idx].axis("off")
 
     step_end = step_start + num_steps
+    valid_min = int(valid_lengths.min()) if valid_lengths.size > 0 else 0
+    valid_max = int(valid_lengths.max()) if valid_lengths.size > 0 else 0
     fig.supxlabel("Step", fontsize=11)
     fig.supylabel(ylabel, fontsize=11)
     fig.suptitle(
         f"{title_prefix} — all DOFs (steps {step_start}–{step_end - 1})\n"
-        f"{num_traj} trajectories",
+        f"{num_traj} trajectories, valid lengths: {valid_min}–{valid_max}",
         fontsize=13,
         y=0.995,
     )
@@ -310,6 +421,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--delta-key",
         default=DEFAULT_DELTA_KEY,
         help=f"NPZ key for frozen delta actions. Default: {DEFAULT_DELTA_KEY}.",
+    )
+    parser.add_argument(
+        "--plot-composed-mean",
+        action="store_true",
+        default=False,
+        help="Overlay composed mean (base + delta) as a green dotted line. Default: off.",
     )
     parser.add_argument(
         "--share-y",
@@ -365,7 +482,7 @@ def main(argv: list[str] | None = None) -> int:
     step_start, step_end = args.step_range
 
     try:
-        base, delta, num_traj = _load_action_arrays(
+        base, delta, num_traj, base_valid_lengths, delta_valid_lengths = _load_action_arrays(
             npz_path=npz_path,
             base_key=args.base_key,
             delta_key=args.delta_key,
@@ -378,7 +495,10 @@ def main(argv: list[str] | None = None) -> int:
             output_path=output_path,
             step_start=step_start,
             num_traj=num_traj,
+            base_valid_lengths=base_valid_lengths,
+            delta_valid_lengths=delta_valid_lengths,
             share_y=args.share_y,
+            plot_composed_mean=args.plot_composed_mean,
             ncols=args.ncols,
             dpi=args.dpi,
             title_prefix=args.title,
@@ -391,6 +511,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[INFO] Loaded: {npz_path.name}")
     print(f"[INFO] Trajectories: {num_traj}, steps: {num_steps}, action dims: {num_dims}")
     print(f"[INFO] Step slice: [{step_start}:{step_start + num_steps})")
+    valid_lengths_msg = (
+        f"base {int(base_valid_lengths.min())}-{int(base_valid_lengths.max())}, "
+        f"delta {int(delta_valid_lengths.min())}-{int(delta_valid_lengths.max())}"
+    )
+    if args.plot_composed_mean:
+        composed_valid_lengths = np.minimum(base_valid_lengths, delta_valid_lengths)
+        valid_lengths_msg += (
+            f", composed {int(composed_valid_lengths.min())}-{int(composed_valid_lengths.max())}"
+        )
+    print(f"[INFO] Valid lengths (masked padding): {valid_lengths_msg}")
     print(f"[INFO] Saved action plot: {saved_path}")
 
     if args.plot_obs_joint_pos:
@@ -398,7 +528,7 @@ def main(argv: list[str] | None = None) -> int:
             args.obs_joint_pos_output or _default_obs_joint_pos_output_path(npz_path)
         ).expanduser().resolve()
         try:
-            obs_joint_pos, obs_num_traj = _load_3d_array(
+            obs_joint_pos, obs_num_traj, obs_valid_lengths = _load_3d_array(
                 npz_path=npz_path,
                 key=args.obs_joint_pos_key,
                 step_start=step_start,
@@ -409,6 +539,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_path=obs_joint_pos_output,
                 step_start=step_start,
                 num_traj=obs_num_traj,
+                valid_lengths=obs_valid_lengths,
                 series_color=JOINT_POS_COLOR,
                 ylabel=JOINT_POS_REL_YLABEL,
                 title_prefix=JOINT_POS_REL_TITLE,
@@ -423,7 +554,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         else:
             _, obs_steps, obs_dims = obs_joint_pos.shape
-            print(f"[INFO] obs_joint_pos dims: {obs_dims}, steps: {obs_steps}")
+            print(
+                f"[INFO] obs_joint_pos dims: {obs_dims}, steps: {obs_steps}, "
+                f"valid lengths: {int(obs_valid_lengths.min())}-{int(obs_valid_lengths.max())}"
+            )
             print(f"[INFO] Saved obs_joint_pos plot: {obs_saved_path}")
 
     return 0
