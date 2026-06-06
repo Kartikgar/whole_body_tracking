@@ -62,8 +62,9 @@ class DeltaJointPositionAction(JointPositionAction):
         delta_actions_full = self._expand_delta_actions_to_full(self._raw_actions)
 
         # We intend to clip "only" the delta actions, not the base actions.
-        delta_actions_full_clipped = torch.clamp(delta_actions_full, min=self._clip[:, :, 0], max=self._clip[:, :, 1])
-        del delta_actions_full
+        if self.cfg.clip is not None:
+            delta_actions_full = torch.clamp(delta_actions_full, min=self._clip[:, :, 0], max=self._clip[:, :, 1])
+            
         if self._motion_command.has_joint_action:
             motion_action = self._motion_command.joint_action
             if motion_action.shape != self._processed_actions.shape:
@@ -71,13 +72,13 @@ class DeltaJointPositionAction(JointPositionAction):
                     "Motion action shape mismatch: "
                     f"expected {self._processed_actions.shape}, got {motion_action.shape}."
                 )
-            combined_actions = delta_actions_full_clipped + motion_action
+            combined_actions = delta_actions_full + motion_action
         elif self.cfg.require_motion_action:
             raise RuntimeError(
                 "DeltaJointPositionAction requires motion files with `action`/`actions` but none was found."
             )
         else:
-            combined_actions = delta_actions_full_clipped
+            combined_actions = delta_actions_full
 
         self._processed_actions = combined_actions * self._scale + self._offset
         # if self.cfg.clip is not None:
