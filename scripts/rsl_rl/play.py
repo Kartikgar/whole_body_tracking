@@ -11,7 +11,7 @@ from isaaclab.app import AppLauncher
 import cli_args  # isort: skip
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
+parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.", allow_abbrev=False)
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument(
@@ -108,6 +108,16 @@ parser.add_argument(
     help=(
         "Output NPZ path for --record_delta_model_dataset. "
         "If omitted, defaults to <checkpoint_name>_<timestamp>.npz under the run directory."
+    ),
+)
+parser.add_argument(
+    "--delta_dataset_suffix",
+    type=str,
+    default=None,
+    help=(
+        "Optional suffix appended to the delta dataset filename when "
+        "--record_delta_model_dataset is enabled. Produces "
+        "<stem>_<timestamp>_<suffix>.npz."
     ),
 )
 parser.add_argument(
@@ -421,11 +431,14 @@ def _has_motion_command(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectM
     )
 
 
-def _append_timestamp_to_path(path: str, timestamp: str) -> str:
+def _append_timestamp_to_path(path: str, timestamp: str, suffix: str | None = None) -> str:
     directory = os.path.dirname(path)
     filename = os.path.basename(path)
     stem, ext = os.path.splitext(filename)
-    stamped = f"{stem}_{timestamp}{ext}"
+    stamped = f"{stem}_{timestamp}"
+    if suffix:
+        stamped = f"{stamped}_{suffix}"
+    stamped = f"{stamped}{ext}"
     return os.path.join(directory, stamped)
 
 
