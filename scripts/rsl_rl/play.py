@@ -517,12 +517,16 @@ def _split_obs_into_term_components(
 
 
 class _DeltaModelTrajectoryRecorder:
-    def __init__(self, num_envs: int, fps: float, target_trajectories: int):
+    def __init__(self, num_envs: int, fps: float, target_trajectories: int, record_ensemble_stats: bool = False):
         self.num_envs = int(num_envs)
         self.fps = float(fps)
         self.target_trajectories = max(int(target_trajectories), 0)
+        self.record_ensemble_stats = bool(record_ensemble_stats)
         self.component_keys: list[str] = []
+        self.auxiliary_keys: list[str] = []
         self.action_key = "actions"
+        self.ensemble_uncertainty_key = "ensemble_uncertainty"
+        self.ensemble_gate_key = "ensemble_gate"
         self.traj_buffers: list[dict[str, list[np.ndarray]]] = [{self.action_key: []} for _ in range(self.num_envs)]
         self.collected_trajectories: list[dict[str, np.ndarray]] = []
         self.saved_count = 0
@@ -551,7 +555,28 @@ class _DeltaModelTrajectoryRecorder:
                 f"expected {self.component_keys}, got {keys}."
             )
 
-    def append_step(self, components: dict[str, torch.Tensor], action_batch: torch.Tensor):
+    def _ensure_auxiliary_keys(self, auxiliary_components: dict[str, torch.Tensor]):
+        keys = list(auxiliary_components.keys())
+        if len(keys) == 0:
+            return
+        if len(self.auxiliary_keys) == 0:
+            self.auxiliary_keys = keys
+            for env_id in range(self.num_envs):
+                for key in self.auxiliary_keys:
+                    self.traj_buffers[env_id][key] = []
+            return
+        if keys != self.auxiliary_keys:
+            raise AssertionError(
+                "Logged auxiliary keys changed during rollout: "
+                f"expected {self.auxiliary_keys}, got {keys}."
+            )
+
+    def append_step(
+        self,
+        components: dict[str, torch.Tensor],
+        action_batch: torch.Tensor,
+        auxiliary_components: dict[str, torch.Tensor] | None = None,
+    ):
         self._ensure_component_keys(components)
         action_np = action_batch.detach().to("cpu", dtype=torch.float32).numpy()
         if action_np.ndim != 2 or action_np.shape[0] != self.num_envs:
@@ -566,9 +591,32 @@ class _DeltaModelTrajectoryRecorder:
                 )
             component_np_map[key] = component_np
 
+        auxiliary_np_map: dict[str, np.ndarray] = {}
+        if self.record_ensemble_stats:
+            if auxiliary_components is None:
+                raise AssertionError(
+                    "Ensemble stats logging is enabled but no auxiliary components were provided."
+                )
+            self._ensure_auxiliary_keys(auxiliary_components)
+            for key in self.auxiliary_keys:
+                auxiliary_np = auxiliary_components[key].detach().to("cpu", dtype=torch.float32).numpy()
+                if auxiliary_np.ndim == 1:
+                    if auxiliary_np.shape[0] != self.num_envs:
+                        raise AssertionError(
+                            f"Expected auxiliary '{key}' shape [num_envs] or [num_envs, D], got {auxiliary_np.shape}."
+                        )
+                    auxiliary_np = auxiliary_np.reshape(self.num_envs, 1)
+                elif auxiliary_np.ndim != 2 or auxiliary_np.shape[0] != self.num_envs:
+                    raise AssertionError(
+                        f"Expected auxiliary '{key}' shape [num_envs] or [num_envs, D], got {auxiliary_np.shape}."
+                    )
+                auxiliary_np_map[key] = auxiliary_np
+
         for env_id in range(self.num_envs):
             for key in self.component_keys:
                 self.traj_buffers[env_id][key].append(component_np_map[key][env_id].astype(np.float32).copy())
+            for key in self.auxiliary_keys:
+                self.traj_buffers[env_id][key].append(auxiliary_np_map[key][env_id].astype(np.float32).copy())
             self.traj_buffers[env_id][self.action_key].append(action_np[env_id].astype(np.float32).copy())
 
     def finalize_done(self, dones: torch.Tensor) -> int:
@@ -599,7 +647,7 @@ class _DeltaModelTrajectoryRecorder:
             return 0
         if len(self.traj_buffers[env_id][self.action_key]) == 0:
             return 0
-        keys = [*self.component_keys, self.action_key]
+        keys = [*self.component_keys, *self.auxiliary_keys, self.action_key]
         traj = {key: np.stack(self.traj_buffers[env_id][key], axis=0).astype(np.float32) for key in keys}
         self.collected_trajectories.append(traj)
         self.traj_buffers[env_id] = {key: [] for key in keys}
@@ -620,7 +668,7 @@ class _DeltaModelTrajectoryRecorder:
             else self.collected_trajectories[: self.target_trajectories]
         )
         motion_length = max(int(traj[self.action_key].shape[0]) for traj in trajs)
-        payload_keys = [*self.component_keys, self.action_key]
+        payload_keys = [*self.component_keys, *self.auxiliary_keys, self.action_key]
         feature_shapes = {key: tuple(trajs[0][key].shape[1:]) for key in payload_keys}
 
         payload: dict[str, np.ndarray] = {
@@ -990,10 +1038,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print("[WARN]: Could not resolve control dt; using fallback fps=1.0 for delta-model dataset logging.")
             control_dt = 1.0
         delta_fps = 1.0 / control_dt
+        record_ensemble_stats = ppo_runner.delta_policy_ensemble_size > 1
         delta_dataset_recorder = _DeltaModelTrajectoryRecorder(
             num_envs=env.num_envs,
             fps=delta_fps,
             target_trajectories=args_cli.delta_dataset_target_trajectories,
+            record_ensemble_stats=record_ensemble_stats,
         )
         checkpoint_stem = os.path.splitext(os.path.basename(resume_path))[0]
         default_delta_npz = os.path.join(
@@ -1004,7 +1054,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         requested_output = args_cli.output_delta_model_npz or default_delta_npz
         requested_output = os.path.abspath(os.path.expanduser(requested_output))
         run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        delta_dataset_output_path = _append_timestamp_to_path(requested_output, run_timestamp)
+        delta_dataset_suffix = args_cli.delta_dataset_suffix.strip() if args_cli.delta_dataset_suffix else None
+        delta_dataset_output_path = _append_timestamp_to_path(
+            requested_output, run_timestamp, suffix=delta_dataset_suffix
+        )
 
         if ppo_runner.delta_policy is None:
             print(
@@ -1012,7 +1065,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "recording active policy obs/actions."
             )
         else:
-            print("[INFO]: Delta-model dataset logging enabled; recording frozen delta-policy obs/actions only.")
+            if record_ensemble_stats:
+                print(
+                    "[INFO]: Delta-model dataset logging enabled; recording frozen delta-policy obs/actions "
+                    "and per-step ensemble uncertainty/gate."
+                )
+            else:
+                print("[INFO]: Delta-model dataset logging enabled; recording frozen delta-policy obs/actions only.")
         if delta_dataset_recorder.target_trajectories > 0:
             print(
                 f"[INFO]: Collecting {delta_dataset_recorder.target_trajectories} completed trajectories into "
@@ -1120,7 +1179,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 logged_components = dict(obs_components)
                 logged_components.update(_resolve_robot_body_world_components_for_logging(env.unwrapped))
                 logged_components.update(_resolve_motion_command_components_for_logging(env.unwrapped))
-                delta_dataset_recorder.append_step(logged_components, delta_log_actions)
+                auxiliary_components = None
+                if delta_dataset_recorder.record_ensemble_stats:
+                    auxiliary_components = {
+                        delta_dataset_recorder.ensemble_uncertainty_key: ppo_runner.delta_policy_last_uncertainty,
+                        delta_dataset_recorder.ensemble_gate_key: ppo_runner.delta_policy_last_gate,
+                    }
+                delta_dataset_recorder.append_step(
+                    logged_components,
+                    delta_log_actions,
+                    auxiliary_components=auxiliary_components,
+                )
             # env stepping
             # actions.zero_()
             # print(actions)

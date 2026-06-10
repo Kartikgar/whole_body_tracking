@@ -6,11 +6,14 @@ Expects NPZ output from ``play.py --record_delta_model_dataset`` on a
 - ``actions`` stores frozen delta-policy outputs
 - ``obs_current_action`` stores same-step base-policy actions
 - ``obs_joint_pos`` stores relative joint-position observation terms
+- ``ensemble_uncertainty`` / ``ensemble_gate`` store per-step delta-ensemble diagnostics
+  when rollout used 2+ frozen delta checkpoints
 
 Each action subplot shows mean and min-max across trajectories for base (blue) and
 delta (orange). Optionally overlay composed mean ``base + delta`` as a green dotted
 line via ``--plot-composed-mean``.
 ``obs_joint_pos`` is plotted separately as a single-series mean/min-max grid.
+Ensemble uncertainty and gate are plotted together when those keys exist.
 
 .. code-block:: bash
 
@@ -42,14 +45,23 @@ from matplotlib.patches import Patch
 DEFAULT_BASE_KEY = "obs_current_action"
 DEFAULT_DELTA_KEY = "actions"
 DEFAULT_OBS_JOINT_POS_KEY = "obs_joint_pos"
+DEFAULT_ENSEMBLE_UNCERTAINTY_KEY = "ensemble_uncertainty"
+DEFAULT_ENSEMBLE_GATE_KEY = "ensemble_gate"
 
 BASE_COLOR = "#2563eb"
 DELTA_COLOR = "#ea580c"
 COMPOSED_COLOR = "#16a34a"
 JOINT_POS_COLOR = "#7c3aed"
+UNCERTAINTY_COLOR = "#dc2626"
+GATE_COLOR = "#0891b2"
 BAND_ALPHA = 0.30
 MEAN_LW = 2.2
 
+JOINT_NAMES = ['left_hip_pitch_joint', 'right_hip_pitch_joint', 'waist_yaw_joint', 'left_hip_roll_joint', 'right_hip_roll_joint', 'waist_roll_joint', 
+'left_hip_yaw_joint', 'right_hip_yaw_joint', 'waist_pitch_joint', 'left_knee_joint', 'right_knee_joint', 'left_shoulder_pitch_joint', 'right_shoulder_pitch_joint', 
+'left_ankle_pitch_joint', 'right_ankle_pitch_joint', 'left_shoulder_roll_joint', 'right_shoulder_roll_joint', 'left_ankle_roll_joint', 'right_ankle_roll_joint', 
+'left_shoulder_yaw_joint', 'right_shoulder_yaw_joint', 'left_elbow_joint', 'right_elbow_joint', 'left_wrist_roll_joint', 'right_wrist_roll_joint', 
+'left_wrist_pitch_joint', 'right_wrist_pitch_joint', 'left_wrist_yaw_joint', 'right_wrist_yaw_joint']
 
 def _parse_step_range(text: str) -> tuple[int, int | None]:
     """Parse ``start:end`` (end exclusive), ``start:``, or ``:end``."""
@@ -71,6 +83,15 @@ def _default_output_path(npz_path: Path) -> Path:
 
 def _default_obs_joint_pos_output_path(npz_path: Path) -> Path:
     return npz_path.with_name(f"{npz_path.stem}_joint_pos_rel_all_dims.png")
+
+
+def _default_ensemble_stats_output_path(npz_path: Path) -> Path:
+    return npz_path.with_name(f"{npz_path.stem}_ensemble_stats.png")
+
+
+def _missing_npz_keys(npz_path: Path, keys: list[str]) -> list[str]:
+    with np.load(npz_path) as data:
+        return [key for key in keys if key not in data.files]
 
 
 def _load_3d_array(
@@ -387,6 +408,78 @@ def plot_aggregate_series(
     return output_path
 
 
+def plot_ensemble_stats(
+    uncertainty: np.ndarray,
+    gate: np.ndarray,
+    *,
+    output_path: Path,
+    step_start: int,
+    num_traj: int,
+    uncertainty_valid_lengths: np.ndarray,
+    gate_valid_lengths: np.ndarray,
+    dpi: int = 150,
+    title_prefix: str | None = None,
+) -> Path:
+    if uncertainty.shape != gate.shape:
+        raise ValueError(f"Uncertainty/gate shape mismatch: {uncertainty.shape} vs {gate.shape}.")
+    if uncertainty.ndim != 3 or uncertainty.shape[2] != 1:
+        raise ValueError(f"Expected ensemble arrays shaped [num_traj, T, 1]; got {uncertainty.shape}.")
+
+    num_traj_data, num_steps, _ = uncertainty.shape
+    if num_traj_data != num_traj:
+        raise ValueError("num_traj argument does not match data.")
+
+    steps = np.arange(step_start, step_start + num_steps)
+    fig, axes = plt.subplots(2, 1, figsize=(10.0, 6.0), dpi=dpi, sharex=True)
+    fig.patch.set_facecolor("white")
+
+    series_specs = [
+        (axes[0], uncertainty, uncertainty_valid_lengths, UNCERTAINTY_COLOR, "Epistemic uncertainty"),
+        (axes[1], gate, gate_valid_lengths, GATE_COLOR, "Ensemble gate"),
+    ]
+    for ax, data, valid_lengths, color, ylabel in series_specs:
+        mean, min_vals, max_vals = _masked_stats(data, valid_lengths)
+        ax.fill_between(
+            steps,
+            min_vals[:, 0],
+            max_vals[:, 0],
+            color=color,
+            alpha=BAND_ALPHA,
+            linewidth=0,
+        )
+        ax.plot(steps, mean[:, 0], color=color, linewidth=MEAN_LW)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.grid(True, color="#e8e8e8", linewidth=0.6)
+        ax.tick_params(labelsize=8)
+        ax.legend(
+            handles=[
+                Line2D([0], [0], color=color, linewidth=MEAN_LW, label="Mean"),
+                Patch(facecolor=color, edgecolor="none", alpha=BAND_ALPHA, label="Min–max"),
+            ],
+            loc="upper right",
+            framealpha=0.95,
+            fontsize=8,
+        )
+
+    step_end = step_start + num_steps
+    valid_min = min(int(uncertainty_valid_lengths.min()), int(gate_valid_lengths.min()))
+    valid_max = max(int(uncertainty_valid_lengths.max()), int(gate_valid_lengths.max()))
+    prefix = title_prefix or "Delta ensemble stats"
+    axes[1].set_xlabel("Step", fontsize=11)
+    fig.suptitle(
+        f"{prefix} — uncertainty and gate (steps {step_start}–{step_end - 1})\n"
+        f"{num_traj} trajectories, valid lengths: {valid_min}–{valid_max}",
+        fontsize=13,
+        y=1.02,
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout(rect=[0, 0, 1, 0.98])
+    fig.savefig(output_path, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return output_path
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -408,7 +501,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--step-range",
         type=_parse_step_range,
-        default=(0, 250),
+        default=(0, 1000),
         metavar="START:END",
         help="Step slice to plot (end exclusive). Default: 0:250. Use e.g. 0: or :500 for open bounds.",
     )
@@ -466,6 +559,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Output PNG for obs_joint_pos plot. Default: <npz_stem>_joint_pos_rel_all_dims.png beside the NPZ.",
+    )
+    parser.add_argument(
+        "--plot-ensemble-stats",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Plot ensemble uncertainty/gate when both keys exist in the NPZ. "
+            "Default: true."
+        ),
+    )
+    parser.add_argument(
+        "--ensemble-uncertainty-key",
+        default=DEFAULT_ENSEMBLE_UNCERTAINTY_KEY,
+        help=f"NPZ key for ensemble uncertainty. Default: {DEFAULT_ENSEMBLE_UNCERTAINTY_KEY}.",
+    )
+    parser.add_argument(
+        "--ensemble-gate-key",
+        default=DEFAULT_ENSEMBLE_GATE_KEY,
+        help=f"NPZ key for ensemble gate. Default: {DEFAULT_ENSEMBLE_GATE_KEY}.",
+    )
+    parser.add_argument(
+        "--ensemble-stats-output",
+        type=Path,
+        default=None,
+        help="Output PNG for ensemble stats plot. Default: <npz_stem>_ensemble_stats.png beside the NPZ.",
     )
     return parser
 
@@ -559,6 +677,58 @@ def main(argv: list[str] | None = None) -> int:
                 f"valid lengths: {int(obs_valid_lengths.min())}-{int(obs_valid_lengths.max())}"
             )
             print(f"[INFO] Saved obs_joint_pos plot: {obs_saved_path}")
+
+    if args.plot_ensemble_stats:
+        ensemble_keys = [args.ensemble_uncertainty_key, args.ensemble_gate_key]
+        missing = _missing_npz_keys(npz_path, ensemble_keys)
+        if missing:
+            print(
+                f"[WARN] Skipping ensemble stats plot: missing keys {missing}.",
+                file=sys.stderr,
+            )
+        else:
+            ensemble_stats_output = (
+                args.ensemble_stats_output or _default_ensemble_stats_output_path(npz_path)
+            ).expanduser().resolve()
+            try:
+                uncertainty, _, uncertainty_valid_lengths = _load_3d_array(
+                    npz_path=npz_path,
+                    key=args.ensemble_uncertainty_key,
+                    step_start=step_start,
+                    step_end=step_end,
+                )
+                gate, gate_num_traj, gate_valid_lengths = _load_3d_array(
+                    npz_path=npz_path,
+                    key=args.ensemble_gate_key,
+                    step_start=step_start,
+                    step_end=step_end,
+                )
+                if num_traj != gate_num_traj:
+                    raise ValueError(f"Trajectory count mismatch: actions={num_traj}, gate={gate_num_traj}.")
+                ensemble_saved_path = plot_ensemble_stats(
+                    uncertainty,
+                    gate,
+                    output_path=ensemble_stats_output,
+                    step_start=step_start,
+                    num_traj=num_traj,
+                    uncertainty_valid_lengths=uncertainty_valid_lengths,
+                    gate_valid_lengths=gate_valid_lengths,
+                    dpi=args.dpi,
+                    title_prefix=args.title,
+                )
+            except (KeyError, ValueError) as exc:
+                print(f"[ERROR] {exc}", file=sys.stderr)
+                return 1
+            else:
+                _, ensemble_steps, _ = uncertainty.shape
+                print(
+                    f"[INFO] Ensemble stats steps: {ensemble_steps}, "
+                    f"uncertainty valid lengths: {int(uncertainty_valid_lengths.min())}-"
+                    f"{int(uncertainty_valid_lengths.max())}, "
+                    f"gate valid lengths: {int(gate_valid_lengths.min())}-"
+                    f"{int(gate_valid_lengths.max())}"
+                )
+                print(f"[INFO] Saved ensemble stats plot: {ensemble_saved_path}")
 
     return 0
 

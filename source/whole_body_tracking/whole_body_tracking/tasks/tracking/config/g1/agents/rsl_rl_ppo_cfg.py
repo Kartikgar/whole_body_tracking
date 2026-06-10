@@ -52,14 +52,15 @@ class G1FlatLowFreqPPORunnerCfg(G1FlatPPORunnerCfg):
 @configclass
 class G1FlatDeltaAFineTunePPORunnerCfg(G1FlatPPORunnerCfg):
     experiment_name = f"{NEXT_LAB_DATE}/g1_finetuned_policies"
-    max_iterations = 10000
+    max_iterations = 500
     save_interval = 100
 
-    # Frozen open-loop delta policy checkpoint used to inject delta actions during rollout.
-    delta_policy_checkpoint: str | None = None
+    # Frozen open-loop delta policy checkpoints used to inject delta actions during rollout.
+    delta_policy_checkpoints: list[str] | None = None
     delta_policy_obs_group: str = "delta_policy"
     delta_policy_critic_obs_group: str = "critic"
     delta_policy_action_buffer_name: str = "delta_external_actions"
     delta_policy_base_action_buffer_name: str = "delta_base_actions"
     delta_policy_require: bool = True
     delta_policy_clip_actions: float | None = None
+    delta_policy_uncertainty_gate_scale: float = 2.5

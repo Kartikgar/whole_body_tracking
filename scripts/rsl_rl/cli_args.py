@@ -48,10 +48,32 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
         help="Wandb run path for checkpoint resume (entity/project/run or entity/project/run/model_x.pt).",
     )
     arg_group.add_argument(
-        "--delta_policy_checkpoint",
+        "--delta_policy_checkpoints",
+        nargs="+",
         type=str,
         default=None,
-        help="Path to frozen delta-policy checkpoint for delta-action finetuning runners.",
+        help=(
+            "One or more frozen open-loop delta-policy checkpoints for delta-action finetuning runners. "
+            "Pass multiple paths to enable uncertainty-gated ensemble inference."
+        ),
+    )
+    arg_group.add_argument(
+        "--delta_policy_uncertainty_gate_scale",
+        type=float,
+        default=None,
+        help=(
+            "Exponential gating scale applied to ensemble epistemic uncertainty. "
+            "Final delta = exp(-scale * uncertainty) * mean(delta_ensemble)."
+        ),
+    )
+    arg_group.add_argument(
+        "--delta_policy_clip_actions",
+        type=float,
+        default=None,
+        help=(
+            "Symmetric clip bound applied to frozen delta-policy actions during finetune/play rollouts. "
+            "If omitted, uses the runner default (env clip_actions when config is None)."
+        ),
     )
 
 
@@ -96,8 +118,20 @@ def update_rsl_rl_cfg(agent_cfg: RslRlOnPolicyRunnerCfg, args_cli: argparse.Name
         agent_cfg.run_name = args_cli.run_name
     if args_cli.logger is not None:
         agent_cfg.logger = args_cli.logger
-    if args_cli.delta_policy_checkpoint is not None and hasattr(agent_cfg, "delta_policy_checkpoint"):
-        agent_cfg.delta_policy_checkpoint = args_cli.delta_policy_checkpoint
+    if args_cli.delta_policy_checkpoints is not None and hasattr(agent_cfg, "delta_policy_checkpoints"):
+        agent_cfg.delta_policy_checkpoints = list(args_cli.delta_policy_checkpoints)
+    if (
+        hasattr(args_cli, "delta_policy_uncertainty_gate_scale")
+        and args_cli.delta_policy_uncertainty_gate_scale is not None
+        and hasattr(agent_cfg, "delta_policy_uncertainty_gate_scale")
+    ):
+        agent_cfg.delta_policy_uncertainty_gate_scale = args_cli.delta_policy_uncertainty_gate_scale
+    if (
+        hasattr(args_cli, "delta_policy_clip_actions")
+        and args_cli.delta_policy_clip_actions is not None
+        and hasattr(agent_cfg, "delta_policy_clip_actions")
+    ):
+        agent_cfg.delta_policy_clip_actions = args_cli.delta_policy_clip_actions
     # set the project name for wandb and neptune
     if agent_cfg.logger in {"wandb", "neptune"} and args_cli.log_project_name:
         agent_cfg.wandb_project = args_cli.log_project_name

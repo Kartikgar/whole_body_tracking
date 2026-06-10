@@ -19,9 +19,9 @@ Use your Isaac Lab conda/env when launching scripts (see [README](../README.md))
 
 **Log layout:** checkpoints go under `logs/rsl_rl/<experiment_name>/<YYYY-MM-DD_HH-MM-SS>_<run_name>/model_*.pt`, with `params/agent.yaml` and `params/env.yaml` saved per run. Default experiment folders (from `rsl_rl_ppo_cfg.py`):
 
-- Base: `2026.06.03/g1_base_policies`
-- Delta open-loop: `2026.06.03/g1_delta_policies`
-- Finetune: `2026.06.03/g1_finetuned_policies`
+- Base: `2026.06.10/g1_base_policies`
+- Delta open-loop: `2026.06.10/g1_delta_policies`
+- Finetune: `2026.06.10/g1_finetuned_policies`
 
 ---
 
@@ -34,7 +34,7 @@ Motion NPZ  -->  (1) Train base tracking
               (2) Train open-loop delta  (motion NPZ must include action/actions)
                       |
                       v
-              (3) Finetune base with --delta_policy_checkpoint=<open-loop model.pt>
+              (3) Finetune base with --delta_policy_checkpoints <open-loop model.pt> [...]
                       |
                       v
               Deploy: play.py exports finetuned base ONNX; Genesis eval uses base only
@@ -333,17 +333,26 @@ python scripts/scratch/plot_state_action_trajectories.py \
 
 **Task:** `Tracking-Flat-G1-DeltaA-Finetune-v0`  
 **Runner cfg:** `G1FlatDeltaAFineTunePPORunnerCfg`  
-**Requires:** `--delta_policy_checkpoint` pointing to a trained **open-loop** delta checkpoint (`model_*.pt`).
+**Requires:** `--delta_policy_checkpoints` with one or more trained **open-loop** delta checkpoints (`model_*.pt`).
 
-At each env step during training: base policy acts; frozen delta reads `delta_policy` obs (previous delta + current base action); env applies `base + delta` via `ExternalDeltaJointPositionAction`. PPO updates **only the base policy**.
+At each env step during training: base policy acts; frozen delta reads the `delta_policy` obs group (proprio + `current_action` from the same-step base output); env applies `base + delta` via `ExternalDeltaJointPositionAction`. PPO updates **only the base policy**.
 
-### Train
+**Delta loading behavior:**
+
+| Checkpoints passed | Inference |
+|--------------------|-----------|
+| 1 | That policy's delta action is injected directly (no uncertainty gating) |
+| 2+ | Mean delta across members, scaled by `exp(-scale * uncertainty)` via `--delta_policy_uncertainty_gate_scale` (default `1.0`) |
+
+Pass each ensemble member explicitly. There is no automatic sibling-run discovery.
+
+### Train (single frozen delta)
 
 ```bash
 python scripts/rsl_rl/train.py \
   --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
   --motion_file /abs/path/to/motion.npz \
-  --delta_policy_checkpoint /abs/path/to/open_loop_delta/model_9999.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_9999.pt \
   --num_envs 4096 \
   --headless \
   --run_name finetune_walk1_frozen_delta
@@ -355,11 +364,31 @@ Optional: initialize finetune from a **base** checkpoint via resume (base weight
 python scripts/rsl_rl/train.py \
   --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
   --motion_file /abs/path/to/motion.npz \
-  --delta_policy_checkpoint /abs/path/to/open_loop_delta/model_9999.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_9999.pt \
   --resume True \
   --checkpoint /abs/path/to/base_tracking/model_30000.pt \
   --num_envs 4096 \
   --headless
+```
+
+### Train with delta ensemble
+
+Pass every open-loop delta checkpoint you want in the ensemble:
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --motion_file /abs/path/to/motion.npz \
+  --delta_policy_checkpoints \
+    /abs/path/to/open_loop_delta/EB1/model_800.pt \
+    /abs/path/to/open_loop_delta/EB2/model_800.pt \
+    /abs/path/to/open_loop_delta/EB3/model_800.pt \
+  --delta_policy_uncertainty_gate_scale 1.0 \
+  --resume True \
+  --checkpoint /abs/path/to/base_tracking/model_30000.pt \
+  --num_envs 4096 \
+  --headless \
+  --run_name finetune_walk1_delta_ensemble
 ```
 
 ### Finetune with COM-force frozen delta
@@ -368,7 +397,7 @@ python scripts/rsl_rl/train.py \
 python scripts/rsl_rl/train.py \
   --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
   --motion_file /abs/path/to/motion.npz \
-  --delta_policy_checkpoint /abs/path/to/open_loop_com_force_model.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_com_force_model.pt \
   --delta_action_space com_force \
   --delta_com_force_scale 1.0 \
   --delta_com_force_clip 1.0 \
@@ -378,13 +407,31 @@ python scripts/rsl_rl/train.py \
 
 ### Evaluate in Isaac Lab (base + frozen delta)
 
-**Important:** `play.py` does **not** auto-load `delta_policy_checkpoint` from the finetune run’s `agent.yaml` — pass it explicitly.
+**Important:** `play.py` does **not** auto-load `delta_policy_checkpoints` from the finetune run's `agent.yaml` — pass them explicitly.
+
+Single delta:
 
 ```bash
 python scripts/rsl_rl/play.py \
   --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
   --checkpoint /abs/path/to/finetuned_model_5000.pt \
-  --delta_policy_checkpoint /abs/path/to/open_loop_delta/model_9999.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_9999.pt \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 4 \
+  --disable_dr
+```
+
+Delta ensemble:
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --checkpoint /abs/path/to/finetuned_model_5000.pt \
+  --delta_policy_checkpoints \
+    /abs/path/to/open_loop_delta/EB1/model_800.pt \
+    /abs/path/to/open_loop_delta/EB2/model_800.pt \
+    /abs/path/to/open_loop_delta/EB3/model_800.pt \
+  --delta_policy_uncertainty_gate_scale 1.0 \
   --motion_file /abs/path/to/motion.npz \
   --num_envs 4 \
   --disable_dr
@@ -396,7 +443,7 @@ With video:
 python scripts/rsl_rl/play.py \
   --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
   --checkpoint /abs/path/to/finetuned_model_5000.pt \
-  --delta_policy_checkpoint /abs/path/to/open_loop_delta/model_9999.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_9999.pt \
   --motion_file /abs/path/to/motion.npz \
   --num_envs 4 \
   --disable_dr \
@@ -411,7 +458,7 @@ With frozen delta loaded, logging records **delta branch** obs/actions (not base
 python scripts/rsl_rl/play.py \
   --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
   --checkpoint /abs/path/to/finetuned_model_5000.pt \
-  --delta_policy_checkpoint /abs/path/to/open_loop_delta/model_9999.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_9999.pt \
   --motion_file /abs/path/to/motion.npz \
   --num_envs 64 \
   --disable_dr \
@@ -435,7 +482,7 @@ python scripts/scratch/plot_delta_finetune_actions.py \
 python scripts/rsl_rl/play.py \
   --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
   --checkpoint /abs/path/to/finetuned_model_5000.pt \
-  --delta_policy_checkpoint /abs/path/to/open_loop_delta/model_9999.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_9999.pt \
   --motion_file /abs/path/to/motion.npz \
   --num_envs 1 \
   --headless
@@ -471,7 +518,8 @@ python scripts/rsl_rl/evaluate_sim2sim_genesis.py \
 | `--resume True` | train | Resume from checkpoint |
 | `--checkpoint` | both | Absolute path to `model_*.pt` |
 | `--wandb_path` | both | `entity/project/run` or `.../run/model_X.pt` |
-| `--delta_policy_checkpoint` | train, play | Frozen open-loop delta for finetune |
+| `--delta_policy_checkpoints` | train, play | One or more frozen open-loop delta checkpoints for finetune/play |
+| `--delta_policy_uncertainty_gate_scale` | train, play | Ensemble gating scale when 2+ delta checkpoints are passed (default `1.0`; ignored for a single checkpoint) |
 | `--delta_action_space` | both | `whole_body` (default), `ankles`, `lower_body`, `com_force` |
 | `--record_delta_model_dataset` | play | NPZ delta obs/actions |
 | `--record_state_action_trajectories` | play | NPZ joint/body state + applied actions |
