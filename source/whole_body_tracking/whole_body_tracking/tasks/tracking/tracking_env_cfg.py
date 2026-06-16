@@ -327,6 +327,6 @@ class TrackingEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physics_material = self.scene.terrain.physics_material
         self.sim.physx.gpu_max_rigid_patch_count = 10 * 2**15
         # viewer settings
-        self.viewer.eye = (1.5, 1.5, 1.5)
+        self.viewer.eye = (1.7, 1.7, 0.6)
         self.viewer.origin_type = "asset_root"
         self.viewer.asset_name = "robot"

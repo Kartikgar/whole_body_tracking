@@ -198,7 +198,7 @@ class G1FlatDeltaAOpenLoopEnvCfg(G1FlatEnvCfg):
             use_default_offset=True,
             motion_command_name="motion",
             require_motion_action=True,
-            clip={".*": (-10.0, 10.0)},
+            # clip={".*": (-10.0, 10.0)},
         )
         self.actions.joint_pos.scale = G1_ACTION_SCALE
         self.commands.motion.body_names = [
@@ -254,7 +254,7 @@ class G1FlatDeltaAFineTuneEnvCfg(G1FlatEnvCfg):
             external_action_buffer_name="delta_external_actions",
             external_action_scale=1.0,
             require_external_action=True,
-            external_delta_action_clip=(-10.0, 10.0),
+            # external_delta_action_clip=(-10.0, 10.0),
         )
         self.actions.joint_pos.scale = G1_ACTION_SCALE
 

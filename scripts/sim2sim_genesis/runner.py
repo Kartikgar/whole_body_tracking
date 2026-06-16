@@ -298,7 +298,8 @@ class Sim2SimRunner:
                 break
 
         if self.scene.camera is not None:
-            filename = self.config.video_name or f"logs/sim2sim_eval/{DEFAULT_NEXT_LAB_DATE}/{run_timestamp}_genesis_eval.mp4"
+            merged_policy_path = self.config.policy_path.replace("/", "_")[:-2]
+            filename = self.config.video_name or f"logs/sim2sim_eval/{DEFAULT_NEXT_LAB_DATE}/{run_timestamp}_{merged_policy_path}.mp4"
             self.scene.stop_recording(filename=filename, fps=round(1.0 / self.config.control_dt))
         if step_pbar is not None:
             step_pbar.close()

@@ -172,15 +172,11 @@ def parse_policy_meta(raw_meta: dict[str, str]) -> PolicyMeta:
     if len(history_lengths) != len(observation_names):
         history_lengths = [1] * len(observation_names)
 
-    joint_stiffness_orig = np.array(parse_csv_list(raw_meta["joint_stiffness"], float), dtype=np.float32)
-    joint_damping_orig = np.array(parse_csv_list(raw_meta["joint_damping"], float), dtype=np.float32)
-    joint_stiffness_final, joint_damping_final = apply_kp_kd_perturbation(joint_stiffness_orig, joint_damping_orig)
-
     return PolicyMeta(
         joint_names=parse_csv_list(raw_meta["joint_names"], str),
         default_joint_pos=np.array(parse_csv_list(raw_meta["default_joint_pos"], float), dtype=np.float32),
-        joint_stiffness=joint_stiffness_final,
-        joint_damping=joint_damping_final,
+        joint_stiffness=np.array(parse_csv_list(raw_meta["joint_stiffness"], float), dtype=np.float32),
+        joint_damping=np.array(parse_csv_list(raw_meta["joint_damping"], float), dtype=np.float32),
         action_scale=np.array(parse_csv_list(raw_meta["action_scale"], float), dtype=np.float32),
         observation_names=observation_names,
         observation_history_lengths=[max(int(value), 1) for value in history_lengths],

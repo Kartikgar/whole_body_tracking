@@ -37,7 +37,7 @@ DEFAULT_STARTUP_QPOS_JOINT_RANGE = (-0.10, 0.10)
 
 # Kp/Kd perturbation uses this seed only, not `--seed` / evaluation seed.
 EVAL_KP_KD_PERTURB_RNG_SEED = 913_571
-KP_KD_PERTURB_SCALE = 0.27
+KP_KD_PERTURB_SCALE = 0.0
 
 SUPPORTED_OBSERVATION_TERMS: tuple[str, ...] = (
     "command",
@@ -96,12 +96,8 @@ G1_ALL_BODY_JOINT_NAMES: tuple[str, ...] = (
     "right_wrist_yaw_joint",
 )
 
-DEFAULT_NEXT_LAB_DATE = "2026.06.10"
+DEFAULT_NEXT_LAB_DATE = "2026.06.17"
 DEFAULT_REFERENCE_MARKER_RADIUS = 0.05
-
-# Kp/Kd perturbation uses this seed only, not `--seed` / evaluation seed.
-EVAL_KP_KD_PERTURB_RNG_SEED = 913_571
-KP_KD_PERTURB_SCALE = 0.27
 
 DEFAULT_G1_URDF = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
