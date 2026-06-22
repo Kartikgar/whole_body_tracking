@@ -798,11 +798,11 @@ def _resolve_robot_state_components_for_logging(env) -> dict[str, torch.Tensor]:
             if set(components.keys()) == set(DEFAULT_STATE_ACTION_KEYS):
                 return components
 
-    scene = getattr(env, "scene", None)
-    if scene is None or "robot" not in scene:
+    robot = _get_scene_robot(env)
+    if robot is None:
         return {}
 
-    robot_data = scene["robot"].data
+    robot_data = robot.data
     components = {
         "joint_pos": robot_data.joint_pos,
         "joint_vel": robot_data.joint_vel,
@@ -819,6 +819,109 @@ def _resolve_robot_state_components_for_logging(env) -> dict[str, torch.Tensor]:
                 f"Expected logged robot state '{key}' batch size {env.num_envs}, got {tuple(value.shape)}."
             )
     return components
+
+
+def _get_scene_robot(env):
+    """Return the scene robot articulation if present."""
+
+    scene = getattr(env, "scene", None)
+    if scene is None:
+        return None
+    try:
+        return scene["robot"]
+    except (KeyError, TypeError):
+        return None
+
+
+def _is_delta_open_loop_state_action_logging(env) -> bool:
+    """True when joint_pos uses trainable delta+ motion composition (not external-delta finetune)."""
+
+    action_manager = getattr(env, "action_manager", None)
+    if action_manager is None:
+        return False
+    try:
+        joint_pos_term = action_manager.get_term("joint_pos")
+    except Exception:
+        return False
+    return joint_pos_term.__class__.__name__ == "DeltaJointPositionAction"
+
+
+def _resolve_motion_joint_action_for_logging(env) -> torch.Tensor | None:
+    """Return the motion reference joint action used by Delta-OpenLoop action terms."""
+
+    command_manager = getattr(env, "command_manager", None)
+    if command_manager is None:
+        return None
+    try:
+        motion_term = command_manager.get_term("motion")
+    except Exception:
+        return None
+    if not getattr(motion_term, "has_joint_action", False):
+        return None
+    joint_action = motion_term.joint_action
+    if not isinstance(joint_action, torch.Tensor):
+        return None
+    if joint_action.ndim != 2 or int(joint_action.shape[0]) != env.num_envs:
+        raise AssertionError(
+            f"Expected motion_joint_action shape [num_envs, A], got {tuple(joint_action.shape)}."
+        )
+    return joint_action
+
+
+def _resolve_state_action_metadata(
+    env,
+    *,
+    has_delta_policy: bool,
+    log_motion_joint_action: bool = False,
+) -> dict[str, object]:
+    """Collect NPZ metadata for cross-sim state-action transfer datasets."""
+
+    robot = _get_scene_robot(env)
+    if robot is None:
+        raise RuntimeError("Could not resolve robot scene for state-action metadata.")
+
+    robot_data = robot.data
+    joint_names = list(robot_data.joint_names)
+    default_joint_pos = robot_data.default_joint_pos[0].detach().cpu().numpy().astype(np.float32)
+
+    action_scale = np.ones(len(joint_names), dtype=np.float32)
+    external_action_scale = 1.0
+    action_manager = getattr(env, "action_manager", None)
+    if action_manager is not None:
+        try:
+            joint_pos_term = action_manager.get_term("joint_pos")
+            scale_tensor = getattr(joint_pos_term, "_scale", None)
+            if isinstance(scale_tensor, torch.Tensor):
+                scale_np = scale_tensor[0].detach().cpu().numpy().astype(np.float32).reshape(-1)
+                if scale_np.shape[0] == action_scale.shape[0]:
+                    action_scale = scale_np
+            external_action_scale = float(getattr(joint_pos_term.cfg, "external_action_scale", 1.0))
+        except Exception:
+            pass
+
+    body_names: list[str] = []
+    command_manager = getattr(env, "command_manager", None)
+    if command_manager is not None:
+        try:
+            motion_term = command_manager.get_term("motion")
+            body_names = list(getattr(motion_term.cfg, "body_names", []))
+        except Exception:
+            body_names = []
+
+    if has_delta_policy:
+        action_mode = "base_plus_delta_states"
+    elif log_motion_joint_action:
+        action_mode = "motion_joint_action_states"
+    else:
+        action_mode = "base_policy_raw"
+    return {
+        "joint_names": joint_names,
+        "body_names": body_names,
+        "default_joint_pos": default_joint_pos,
+        "action_scale": action_scale,
+        "external_action_scale": np.array([external_action_scale], dtype=np.float32),
+        "action_mode": action_mode,
+    }
 
 
 def _resolve_motion_command_components_for_logging(env) -> dict[str, torch.Tensor]:
@@ -1095,6 +1198,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     state_action_recorder = None
     state_action_output_path = None
+    state_action_log_motion_joint_action = False
     if args_cli.record_state_action_trajectories:
         control_dt = _resolve_control_dt(env)
         if control_dt <= 0.0:
@@ -1105,6 +1209,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             num_envs=env.num_envs,
             fps=state_action_fps,
             target_trajectories=args_cli.state_action_target_trajectories,
+            secondary_action_keys=("base_actions", "delta_actions")
+            if ppo_runner.delta_policy is not None
+            else (),
         )
         checkpoint_stem = os.path.splitext(os.path.basename(resume_path))[0]
         default_state_action_npz = os.path.join(
@@ -1116,7 +1223,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         requested_output = os.path.abspath(os.path.expanduser(requested_output))
         run_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         state_action_output_path = _append_timestamp_to_path(requested_output, run_timestamp)
+        state_action_log_motion_joint_action = _is_delta_open_loop_state_action_logging(env.unwrapped)
         print("[INFO]: State-action trajectory logging enabled.")
+        if state_action_log_motion_joint_action:
+            print(
+                "[INFO]: Delta-OpenLoop task detected: recording motion_joint_action in `actions` "
+                "(policy delta still drives simulation)."
+            )
         if state_action_recorder.target_trajectories > 0:
             print(
                 f"[INFO]: Collecting {state_action_recorder.target_trajectories} completed trajectories into "
@@ -1156,6 +1269,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _bootstrap_motion_reference_startup(env)
     obs, _ = env.get_observations()
     prev_motion_time_steps = _get_motion_time_steps(env.unwrapped)
+    if state_action_recorder is not None:
+        bootstrap_state = _resolve_robot_state_components_for_logging(env.unwrapped)
+        if len(bootstrap_state) == 0:
+            raise RuntimeError(
+                "State-action trajectory logging is enabled but robot state tensors could not be resolved."
+            )
+        state_action_recorder.capture_initial_if_new_traj(bootstrap_state)
     timestep = 0
     # simulate environment
     while simulation_app.is_running():
@@ -1170,6 +1290,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             delta_log_obs = obs
             delta_log_obs_group = "policy"
             delta_log_actions = policy_actions
+            delta_actions = None
             if ppo_runner.delta_policy is not None:
                 # Inject same-step base-policy action for delta-policy current_action input.
                 ppo_runner._set_delta_base_action_buffer(actions)
@@ -1203,10 +1324,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     delta_log_actions,
                     auxiliary_components=auxiliary_components,
                 )
+
+            if state_action_recorder is not None:
+                pre_step_state = _resolve_robot_state_components_for_logging(env.unwrapped)
+                if len(pre_step_state) == 0:
+                    raise RuntimeError(
+                        "State-action trajectory logging is enabled but robot state tensors could not be resolved."
+                    )
+                state_action_recorder.capture_initial_if_new_traj(pre_step_state)
+
             # env stepping
-            # actions.zero_()
-            # print(actions)
-            # import ipdb;ipdb.set_trace()
+            state_action_step_actions = actions
+            if state_action_recorder is not None and state_action_log_motion_joint_action:
+                motion_joint_action = _resolve_motion_joint_action_for_logging(env.unwrapped)
+                if motion_joint_action is None:
+                    raise RuntimeError(
+                        "Delta-OpenLoop state-action logging requires a motion file with `action`/`actions` "
+                        "so motion_joint_action can be recorded."
+                    )
+                state_action_step_actions = motion_joint_action
 
             obs, _, dones, _ = env.step(actions)
 
@@ -1216,7 +1352,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     raise RuntimeError(
                         "State-action trajectory logging is enabled but robot state tensors could not be resolved."
                     )
-                state_action_recorder.append_step(state_components, actions)
+                auxiliary_actions = None
+                if state_action_recorder.secondary_action_keys:
+                    if delta_actions is None:
+                        delta_actions = torch.zeros_like(actions)
+                    auxiliary_actions = {
+                        "base_actions": actions,
+                        "delta_actions": delta_actions,
+                    }
+                state_action_recorder.append_step(
+                    state_components,
+                    state_action_step_actions,
+                    auxiliary_actions=auxiliary_actions,
+                )
 
             if delta_dataset_recorder is not None or state_action_recorder is not None:
                 done_source = dones
@@ -1285,9 +1433,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             )
 
     if state_action_recorder is not None and state_action_output_path is not None:
+        state_action_metadata = _resolve_state_action_metadata(
+            env.unwrapped,
+            has_delta_policy=ppo_runner.delta_policy is not None,
+            log_motion_joint_action=state_action_log_motion_joint_action,
+        )
         saved_path = state_action_recorder.save_dataset(
             output_path=state_action_output_path,
             include_partial=bool(args_cli.state_action_include_partial),
+            metadata=state_action_metadata,
         )
         if saved_path is None:
             print("[WARN]: State-action trajectory logging was enabled but no samples were collected.")
