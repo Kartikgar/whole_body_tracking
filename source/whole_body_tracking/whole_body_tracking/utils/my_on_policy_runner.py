@@ -325,9 +325,35 @@ class MotionOnPolicyRunner(OnPolicyRunner):
         self.writer.add_scalar("DeltaForce/applied_y", force_stats["applied_force_y"], it)
         self.writer.add_scalar("DeltaForce/applied_z", force_stats["applied_force_z"], it)
 
+    def _log_delta_action_magnitude_metrics(self, it: int):
+        if self.writer is None:
+            return
+        action_manager = getattr(self.env.unwrapped, "action_manager", None)
+        if action_manager is None:
+            return
+        try:
+            joint_pos_term = action_manager.get_term("joint_pos")
+        except Exception:
+            return
+        consume_stats = getattr(joint_pos_term, "consume_delta_action_magnitude_log_stats", None)
+        if consume_stats is None:
+            return
+
+        magnitude_stats = consume_stats()
+        if not magnitude_stats:
+            return
+
+        self.writer.add_scalar(
+            "DeltaAction/magnitude_mean", magnitude_stats["delta_action_magnitude_mean"], it
+        )
+        self.writer.add_scalar(
+            "DeltaAction/magnitude_std", magnitude_stats["delta_action_magnitude_std"], it
+        )
+
     def log(self, locs: dict, width: int = 80, pad: int = 35):
         super().log(locs, width=width, pad=pad)
         self._log_com_force_metrics(locs["it"])
+        self._log_delta_action_magnitude_metrics(locs["it"])
         if self.writer is not None and self.delta_policy_ensemble_size > 1:
             self.writer.add_scalar(
                 "DeltaEnsemble/epistemic_uncertainty_mean", float(self.delta_policy_last_uncertainty.mean().item()), locs["it"]

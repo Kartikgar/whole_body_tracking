@@ -13,7 +13,39 @@ from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_from_angle_axis, quat_rotate
 
 
-class DeltaJointPositionAction(JointPositionAction):
+class DeltaActionMagnitudeLoggerMixin:
+    """Accumulate per-step ||delta_action||_2 stats for training-time logging."""
+
+    def _reset_delta_action_magnitude_log_stats(self) -> None:
+        self._log_delta_action_magnitude_sum = torch.zeros(1, device=self.device, dtype=torch.float32)
+        self._log_delta_action_magnitude_sq_sum = torch.zeros(1, device=self.device, dtype=torch.float32)
+        self._log_delta_action_magnitude_sample_count = 0
+
+    def _accumulate_delta_action_magnitude_log_stats(self, delta_actions: torch.Tensor) -> None:
+        if delta_actions.ndim != 2:
+            raise RuntimeError(f"Expected delta action shape [num_envs, action_dim], got {tuple(delta_actions.shape)}.")
+        norms = torch.linalg.norm(delta_actions.detach(), dim=-1)
+        self._log_delta_action_magnitude_sum += norms.sum().reshape(1)
+        self._log_delta_action_magnitude_sq_sum += torch.square(norms).sum().reshape(1)
+        self._log_delta_action_magnitude_sample_count += int(delta_actions.shape[0])
+
+    def consume_delta_action_magnitude_log_stats(self) -> dict[str, float]:
+        if self._log_delta_action_magnitude_sample_count == 0:
+            return {}
+
+        denom = float(self._log_delta_action_magnitude_sample_count)
+        mean = float((self._log_delta_action_magnitude_sum / denom).item())
+        mean_sq = float((self._log_delta_action_magnitude_sq_sum / denom).item())
+        variance = max(mean_sq - mean * mean, 0.0)
+        stats = {
+            "delta_action_magnitude_mean": mean,
+            "delta_action_magnitude_std": float(variance**0.5),
+        }
+        self._reset_delta_action_magnitude_log_stats()
+        return stats
+
+
+class DeltaJointPositionAction(DeltaActionMagnitudeLoggerMixin, JointPositionAction):
     """Joint-position action with open-loop motion action added before scaling."""
 
     cfg: DeltaJointPositionActionCfg
@@ -26,6 +58,7 @@ class DeltaJointPositionAction(JointPositionAction):
         if self._delta_action_dim != self._num_joints:
             self._raw_actions = torch.zeros(self.num_envs, self._delta_action_dim, device=self.device)
         self._delta_actions_full = torch.zeros(self.num_envs, self._num_joints, device=self.device)
+        self._reset_delta_action_magnitude_log_stats()
 
     @property
     def action_dim(self) -> int:
@@ -59,6 +92,7 @@ class DeltaJointPositionAction(JointPositionAction):
 
     def process_actions(self, actions: torch.Tensor):
         self._raw_actions[:] = actions
+        self._accumulate_delta_action_magnitude_log_stats(self._raw_actions)
         delta_actions_full = self._expand_delta_actions_to_full(self._raw_actions)
 
         # We intend to clip "only" the delta actions, not the base actions.
@@ -500,7 +534,7 @@ class ExternalDeltaComForceAction(DeltaComForceAction):
         self._processed_force_actions[env_ids] = 0.0
 
 
-class ExternalDeltaJointPositionAction(JointPositionAction):
+class ExternalDeltaJointPositionAction(DeltaActionMagnitudeLoggerMixin, JointPositionAction):
     """Joint-position action with an externally provided delta action added before scaling."""
 
     cfg: ExternalDeltaJointPositionActionCfg
@@ -512,6 +546,7 @@ class ExternalDeltaJointPositionAction(JointPositionAction):
         )
         self._external_delta_action_dim = len(self._external_delta_action_indices)
         self._external_delta_actions_full = torch.zeros(self.num_envs, self._num_joints, device=self.device)
+        self._reset_delta_action_magnitude_log_stats()
 
     def _resolve_external_delta_action_indices(self, joint_names: list[str] | None) -> list[int]:
         if joint_names is None:
@@ -576,6 +611,7 @@ class ExternalDeltaJointPositionAction(JointPositionAction):
                 min=self.cfg.external_delta_action_clip[0], 
                 max=self.cfg.external_delta_action_clip[1]
             )
+        self._accumulate_delta_action_magnitude_log_stats(external_delta_action)
         combined_actions = self._raw_actions + self.cfg.external_action_scale * external_delta_action
 
         self._processed_actions = combined_actions * self._scale + self._offset
