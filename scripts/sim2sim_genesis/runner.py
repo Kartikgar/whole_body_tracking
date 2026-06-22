@@ -133,6 +133,9 @@ class Sim2SimRunner:
             self.domain_randomizer.reset_rollout()
             self.scene.update_reference_markers(reference0)
             state_batch = self.scene.extract_state_batch()
+            if self.trajectory_recorder is not None:
+                # Capture the reset state so recorded samples are aligned as (s_t, a_t).
+                self.trajectory_recorder.capture_initial_if_new_traj(state_batch)
             observation = self.observation_builder.build(
                 state_batch,
                 reference0_batch,
@@ -164,10 +167,11 @@ class Sim2SimRunner:
 
                 joint_target = self.controller.compute_joint_target(action_batch, reference_step)
                 self.domain_randomizer.apply_interval_push(t_step)
+                if self.trajectory_recorder is not None:
+                    # Log the current state before stepping so state[t] pairs with action[t].
+                    self.trajectory_recorder.append_step(state_batch, action_batch)
                 self.controller.step(joint_target)
                 state_batch = self.scene.extract_state_batch()
-                if self.trajectory_recorder is not None:
-                    self.trajectory_recorder.append_step(state_batch, action_batch)
                 state = self.scene.state_for_env(state_batch, env_id=0)
 
                 if metrics_enabled:

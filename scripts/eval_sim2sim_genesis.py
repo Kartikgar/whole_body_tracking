@@ -304,11 +304,31 @@ def build_runner(config: EvalConfig) -> Sim2SimRunner:
     domain_randomizer.setup()
     trajectory_recorder = None
     if config.record_motion:
+        recorder_metadata: dict[str, object] = {
+            "joint_names": np.asarray(policy.meta.joint_names, dtype=np.object_),
+            "body_names": np.asarray(scene.log_body_names, dtype=np.object_),
+            "default_joint_pos": policy.meta.default_joint_pos.astype(np.float32),
+            "action_scale": policy.meta.action_scale.astype(np.float32),
+            "action_mode": "base_policy_raw",
+            "policy_path": config.policy_path,
+            "motion_file": config.motion_file if config.motion_file is not None else "",
+            "backend": config.backend,
+            "num_envs": np.array([config.num_envs], dtype=np.int32),
+            "sim_dt": np.array([config.sim_dt], dtype=np.float32),
+            "control_dt": np.array([config.control_dt], dtype=np.float32),
+            "start_timestep": np.array([config.start_timestep], dtype=np.int32),
+            "add_noise": np.array([int(config.add_noise)], dtype=np.int8),
+            "domain_randomization": np.array([int(config.domain_randomization)], dtype=np.int8),
+            "randomize_startup_qpos": np.array([int(config.randomize_startup_qpos)], dtype=np.int8),
+            "startup_qpos_joint_range": np.asarray(config.startup_qpos_joint_range, dtype=np.float32),
+            "seed": np.array([-1 if config.seed is None else int(config.seed)], dtype=np.int32),
+        }
         trajectory_recorder = TrajectoryRecorder(
             num_envs=config.num_envs,
             fps=1.0 / config.control_dt,
             target_trajectories=config.target_trajectories,
             output_path=config.output_motion_npz,
+            metadata=recorder_metadata,
         )
 
     return Sim2SimRunner(

@@ -281,6 +281,179 @@ class GenesisSceneAdapter:
         qvel_command = np.repeat(qvel[None, :], self.num_envs, axis=0) if self.num_envs > 1 else qvel
         self.call_genesis(self.robot.set_dofs_velocity, qvel_command)
 
+    def _map_logged_joints_to_policy(
+        self,
+        logged_joint_names: list[str],
+        logged_joint_values: np.ndarray,
+        policy_joint_names: list[str],
+    ) -> np.ndarray:
+        """Map a logged Isaac joint vector into Genesis policy joint order."""
+
+        name_to_index = {name: idx for idx, name in enumerate(logged_joint_names)}
+        mapped = np.zeros(len(policy_joint_names), dtype=np.float32)
+        for policy_index, joint_name in enumerate(policy_joint_names):
+            if joint_name not in name_to_index:
+                raise KeyError(
+                    f"Logged joint_names missing policy joint '{joint_name}'. "
+                    f"Available logged joints: {logged_joint_names}."
+                )
+            mapped[policy_index] = float(logged_joint_values[name_to_index[joint_name]])
+        return mapped
+
+    def _build_qpos_qvel_from_logged(
+        self,
+        *,
+        logged_joint_names: list[str],
+        initial_joint_pos: np.ndarray,
+        initial_joint_vel: np.ndarray,
+        initial_body_pos_w: np.ndarray,
+        initial_body_quat_w: np.ndarray,
+        initial_body_lin_vel_w: np.ndarray | None,
+        initial_body_ang_vel_w: np.ndarray | None,
+        root_body_index: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Build Genesis qpos/qvel vectors from one logged Isaac initial state."""
+
+        joint_positions = self._map_logged_joints_to_policy(
+            logged_joint_names,
+            np.asarray(initial_joint_pos, dtype=np.float32).reshape(-1),
+            self.joint_names,
+        )
+        joint_velocities = self._map_logged_joints_to_policy(
+            logged_joint_names,
+            np.asarray(initial_joint_vel, dtype=np.float32).reshape(-1),
+            self.joint_names,
+        )
+
+        body_pos = np.asarray(initial_body_pos_w, dtype=np.float32).reshape(-1, 3)
+        body_quat = np.asarray(initial_body_quat_w, dtype=np.float32).reshape(-1, 4)
+        if root_body_index < 0 or root_body_index >= body_pos.shape[0]:
+            raise ValueError(f"root_body_index={root_body_index} out of range for {body_pos.shape[0]} bodies.")
+
+        root_position = body_pos[root_body_index]
+        root_quaternion = body_quat[root_body_index]
+
+        qpos_size = max(7, max(self.joint_qs_indices) + 1)
+        qpos = np.zeros(qpos_size, dtype=np.float32)
+        qpos[:3] = root_position
+        qpos[3:7] = root_quaternion
+        for joint_index, qs_index in enumerate(self.joint_qs_indices):
+            qpos[qs_index] = joint_positions[joint_index]
+
+        qvel_size = len(self.joint_dof_indices) + 6
+        qvel = np.zeros(qvel_size, dtype=np.float32)
+        if initial_body_lin_vel_w is not None:
+            root_lin_vel = np.asarray(initial_body_lin_vel_w, dtype=np.float32).reshape(-1, 3)[root_body_index]
+            qvel[:3] = root_lin_vel
+        if initial_body_ang_vel_w is not None:
+            root_ang_vel = np.asarray(initial_body_ang_vel_w, dtype=np.float32).reshape(-1, 3)[root_body_index]
+            qvel[3:6] = root_ang_vel
+        for joint_index, dof_index in enumerate(self.joint_dof_indices):
+            qvel[6 + joint_index] = joint_velocities[joint_index]
+
+        return qpos, qvel
+
+    def reset_from_logged_state(
+        self,
+        *,
+        logged_joint_names: list[str],
+        initial_joint_pos: np.ndarray,
+        initial_joint_vel: np.ndarray,
+        initial_body_pos_w: np.ndarray,
+        initial_body_quat_w: np.ndarray,
+        initial_body_lin_vel_w: np.ndarray | None = None,
+        initial_body_ang_vel_w: np.ndarray | None = None,
+        root_body_index: int = 0,
+    ) -> None:
+        """Teleport the robot to a logged Isaac pre-action initial state."""
+
+        qpos, qvel = self._build_qpos_qvel_from_logged(
+            logged_joint_names=logged_joint_names,
+            initial_joint_pos=initial_joint_pos,
+            initial_joint_vel=initial_joint_vel,
+            initial_body_pos_w=initial_body_pos_w,
+            initial_body_quat_w=initial_body_quat_w,
+            initial_body_lin_vel_w=initial_body_lin_vel_w,
+            initial_body_ang_vel_w=initial_body_ang_vel_w,
+            root_body_index=root_body_index,
+        )
+
+        if self.num_envs > 1:
+            qpos_command = np.repeat(qpos[None, :], self.num_envs, axis=0)
+            qvel_command = np.repeat(qvel[None, :], self.num_envs, axis=0)
+        else:
+            qpos_command = qpos
+            qvel_command = qvel
+        self.call_genesis(self.robot.set_qpos, qpos_command)
+        self.call_genesis(self.robot.set_dofs_velocity, qvel_command)
+
+    def reset_from_logged_state_batch(
+        self,
+        *,
+        logged_joint_names: list[str],
+        initial_joint_pos: np.ndarray,
+        initial_joint_vel: np.ndarray,
+        initial_body_pos_w: np.ndarray,
+        initial_body_quat_w: np.ndarray,
+        initial_body_lin_vel_w: np.ndarray | None = None,
+        initial_body_ang_vel_w: np.ndarray | None = None,
+        root_body_index: int = 0,
+        batch_size: int | None = None,
+    ) -> None:
+        """Teleport each environment to a distinct logged Isaac pre-action initial state."""
+
+        initial_joint_pos = np.asarray(initial_joint_pos, dtype=np.float32)
+        initial_joint_vel = np.asarray(initial_joint_vel, dtype=np.float32)
+        initial_body_pos_w = np.asarray(initial_body_pos_w, dtype=np.float32)
+        initial_body_quat_w = np.asarray(initial_body_quat_w, dtype=np.float32)
+
+        if initial_joint_pos.ndim == 1:
+            self.reset_from_logged_state(
+                logged_joint_names=logged_joint_names,
+                initial_joint_pos=initial_joint_pos,
+                initial_joint_vel=initial_joint_vel,
+                initial_body_pos_w=initial_body_pos_w,
+                initial_body_quat_w=initial_body_quat_w,
+                initial_body_lin_vel_w=initial_body_lin_vel_w,
+                initial_body_ang_vel_w=initial_body_ang_vel_w,
+                root_body_index=root_body_index,
+            )
+            return
+
+        active = int(batch_size) if batch_size is not None else int(initial_joint_pos.shape[0])
+        if active <= 0:
+            raise ValueError("batch_size must be positive.")
+        if active > self.num_envs:
+            raise ValueError(f"batch_size={active} exceeds scene num_envs={self.num_envs}.")
+
+        qpos_size = max(7, max(self.joint_qs_indices) + 1)
+        qvel_size = len(self.joint_dof_indices) + 6
+        qpos_command = np.zeros((self.num_envs, qpos_size), dtype=np.float32)
+        qvel_command = np.zeros((self.num_envs, qvel_size), dtype=np.float32)
+
+        for env_id in range(active):
+            lin_vel = None if initial_body_lin_vel_w is None else initial_body_lin_vel_w[env_id]
+            ang_vel = None if initial_body_ang_vel_w is None else initial_body_ang_vel_w[env_id]
+            qpos, qvel = self._build_qpos_qvel_from_logged(
+                logged_joint_names=logged_joint_names,
+                initial_joint_pos=initial_joint_pos[env_id],
+                initial_joint_vel=initial_joint_vel[env_id],
+                initial_body_pos_w=initial_body_pos_w[env_id],
+                initial_body_quat_w=initial_body_quat_w[env_id],
+                initial_body_lin_vel_w=lin_vel,
+                initial_body_ang_vel_w=ang_vel,
+                root_body_index=root_body_index,
+            )
+            qpos_command[env_id] = qpos
+            qvel_command[env_id] = qvel
+
+        if active < self.num_envs:
+            qpos_command[active:] = qpos_command[active - 1 : active]
+            qvel_command[active:] = qvel_command[active - 1 : active]
+
+        self.call_genesis(self.robot.set_qpos, qpos_command)
+        self.call_genesis(self.robot.set_dofs_velocity, qvel_command)
+
     def extract_state_batch(self) -> dict[str, np.ndarray]:
         """Read joint and body state tensors from Genesis for all active environments."""
 
@@ -343,3 +516,50 @@ class GenesisSceneAdapter:
         """Extract a single environment slice from a batched state dictionary."""
 
         return {key: value[env_id] for key, value in state_batch.items()}
+
+    def _resolve_logged_body_indices(self, body_names: list[str]) -> list[int]:
+        """Map body names to indices in ``log_body_names``."""
+
+        missing = [name for name in body_names if name not in self.log_body_names]
+        if missing:
+            raise KeyError(
+                "Requested body names are missing from Genesis log body list: "
+                f"{missing}. Available: {self.log_body_names}."
+            )
+        return [self.log_body_names.index(name) for name in body_names]
+
+    def extract_body_states_by_names(
+        self,
+        body_names: list[str],
+        *,
+        env_id: int = 0,
+        state_batch: dict[str, np.ndarray] | None = None,
+    ) -> dict[str, np.ndarray]:
+        """Extract world-frame body states for a named subset (single environment)."""
+
+        if len(body_names) == 0:
+            raise ValueError("body_names must not be empty.")
+
+        batch = self.extract_body_states_batch(body_names, state_batch=state_batch)
+        return {key: value[env_id] for key, value in batch.items()}
+
+    def extract_body_states_batch(
+        self,
+        body_names: list[str],
+        *,
+        state_batch: dict[str, np.ndarray] | None = None,
+    ) -> dict[str, np.ndarray]:
+        """Extract world-frame body states for a named subset across all environments."""
+
+        if len(body_names) == 0:
+            raise ValueError("body_names must not be empty.")
+
+        if state_batch is None:
+            state_batch = self.extract_state_batch()
+        indices = self._resolve_logged_body_indices(body_names)
+        return {
+            "body_pos_w": state_batch["log_body_pos_w"][:, indices].astype(np.float32),
+            "body_quat_w": state_batch["log_body_quat_w"][:, indices].astype(np.float32),
+            "body_lin_vel_w": state_batch["log_body_lin_vel_w"][:, indices].astype(np.float32),
+            "body_ang_vel_w": state_batch["log_body_ang_vel_w"][:, indices].astype(np.float32),
+        }
