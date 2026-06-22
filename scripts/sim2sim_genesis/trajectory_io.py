@@ -11,10 +11,18 @@ from rsl_rl.utils import StateActionTrajectoryRecorder
 class TrajectoryRecorder:
     """Wrap the shared state-action recorder for Genesis rollout data collection."""
 
-    def __init__(self, num_envs: int, fps: float, target_trajectories: int, output_path: str | None):
+    def __init__(
+        self,
+        num_envs: int,
+        fps: float,
+        target_trajectories: int,
+        output_path: str | None,
+        metadata: dict[str, object] | None = None,
+    ):
         """Create a trajectory recorder for optional motion dataset export."""
 
         self.output_path = output_path
+        self.metadata = dict(metadata) if metadata is not None else {}
         self.recorder = StateActionTrajectoryRecorder(
             num_envs=num_envs,
             fps=fps,
@@ -50,6 +58,19 @@ class TrajectoryRecorder:
         action_tensor = torch.from_numpy(np.asarray(action_batch, dtype=np.float32))
         self.recorder.append_step(state_tensors, action_tensor)
 
+    def capture_initial_if_new_traj(self, state_batch: dict[str, np.ndarray]) -> None:
+        """Snapshot the current pre-action state for trajectories that are about to start."""
+
+        state_tensors = {
+            "joint_pos": torch.from_numpy(state_batch["joint_pos"]),
+            "joint_vel": torch.from_numpy(state_batch["joint_vel"]),
+            "body_pos_w": torch.from_numpy(state_batch["log_body_pos_w"]),
+            "body_quat_w": torch.from_numpy(state_batch["log_body_quat_w"]),
+            "body_lin_vel_w": torch.from_numpy(state_batch["log_body_lin_vel_w"]),
+            "body_ang_vel_w": torch.from_numpy(state_batch["log_body_ang_vel_w"]),
+        }
+        self.recorder.capture_initial_if_new_traj(state_tensors)
+
     def finalize_rollout(self) -> int:
         """Finalize all open per-environment trajectories for the current rollout."""
 
@@ -68,11 +89,16 @@ class TrajectoryRecorder:
         if self.output_path is None:
             return None
 
-        saved_path = self.recorder.save_dataset(self.output_path, include_partial=False)
+        saved_path = self.recorder.save_dataset(
+            self.output_path,
+            include_partial=False,
+            metadata=self.metadata,
+        )
         if saved_path is None:
             return None
 
-        payload = dict(np.load(saved_path))
+        with np.load(saved_path, allow_pickle=True) as saved_payload:
+            payload = dict(saved_payload)
         payload["actions"] = payload["action"]
         np.savez(saved_path, **payload)
         return saved_path
