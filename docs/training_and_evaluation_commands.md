@@ -204,6 +204,54 @@ python scripts/rsl_rl/evaluate_sim2sim_genesis.py \
   --output_csv logs/sim2sim_eval/g1_base_eval.csv
 ```
 
+### Transfer validation: Isaac (base + frozen δ) → Genesis (base-only open-loop)
+
+**Goal:** test `Isaac(base + frozen_delta) ≈ Genesis(replay base_actions)` from matched initial states.  
+Delta is **never** replayed in Genesis (deployment-style base-only control).
+
+**1. Record source trajectories in Isaac** (stage-1 base or stage-3 finetuned base + **same frozen stage-2 delta**):
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --checkpoint /abs/path/to/base_or_finetuned_base/model_XXXX.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_YYYY.pt \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 50 \
+  --disable_dr \
+  --delta_policy_clip_actions 5.0 \
+  --record_state_action_trajectories \
+  --state_action_target_trajectories 50 \
+  --headless
+```
+
+NPZ includes `initial_*`, `base_actions`, `delta_actions`, post-step source states (`joint_pos`, `body_pos_w`, …), and metadata (`joint_names`, `body_names`, `action_scale`, `action_mode=base_plus_delta_states`).
+
+**2. Replay logged base actions open-loop in Genesis** (metadata from exported **base** ONNX):
+
+```bash
+python scripts/replay_openloop_genesis.py \
+  --state_action_npz /abs/path/to/state_action_datasets/model_XXXX_state_action_....npz \
+  --policy_path /abs/path/to/checkpoint_dir/exported/model_XXXX.onnx \
+  --urdf_file source/whole_body_tracking/whole_body_tracking/assets/unitree_description/urdf/g1/main.urdf \
+  --backend cpu \
+  --control_dt 0.02 \
+  --num_envs 50
+```
+
+**3. Compare source vs replay state trajectories:**
+
+```bash
+python scripts/scratch/compare_transfer_trajectories.py \
+  /abs/path/to/isaac_state_action.npz \
+  /abs/path/to/isaac_state_action_genesis_base_replay_....npz \
+  --compare both
+```
+
+By default this writes two overlays: policy-relative `joint_pos` and world-frame `body_pos_w` (aligned by `body_names`). Use `--compare joints` or `--compare bodies` to plot one only.
+
+**Interpretation:** post–stage-2 success means frozen delta already makes Genesis(base) track Isaac(base+δ). Stage-3 base finetune is optional A/B with the **same frozen delta checkpoint**.
+
 ---
 
 ## 2. Open-loop delta action policy
