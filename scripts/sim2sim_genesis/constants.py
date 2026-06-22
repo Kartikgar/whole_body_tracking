@@ -96,7 +96,7 @@ G1_ALL_BODY_JOINT_NAMES: tuple[str, ...] = (
     "right_wrist_yaw_joint",
 )
 
-DEFAULT_NEXT_LAB_DATE = "2026.06.17"
+DEFAULT_NEXT_LAB_DATE = "2026.06.24"
 DEFAULT_REFERENCE_MARKER_RADIUS = 0.05
 
 DEFAULT_G1_URDF = os.path.join(
