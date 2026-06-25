@@ -124,12 +124,43 @@ class MotionLoader:
     def _to_device_tensor(self, arr: np.ndarray) -> torch.Tensor:
         return torch.tensor(np.ascontiguousarray(arr), dtype=torch.float32, device=self.device)
 
+    @staticmethod
+    def _extract_valid_lengths_from_stacked(
+        data: np.lib.npyio.NpzFile,
+        num_trajectories: int,
+        time_steps: int,
+        motion_file: str,
+    ) -> np.ndarray:
+        if "valid_lengths" not in data.files:
+            return np.full(num_trajectories, time_steps, dtype=np.int64)
+
+        valid_lengths = np.asarray(data["valid_lengths"], dtype=np.int64).reshape(-1)
+        if valid_lengths.shape[0] != num_trajectories:
+            raise ValueError(
+                f"`valid_lengths` length {valid_lengths.shape[0]} in '{motion_file}' does not match "
+                f"trajectory count {num_trajectories}."
+            )
+        if np.any(valid_lengths <= 0) or np.any(valid_lengths > time_steps):
+            raise ValueError(
+                f"Invalid `valid_lengths` in '{motion_file}': expected values in [1, {time_steps}], "
+                f"got min={int(valid_lengths.min())}, max={int(valid_lengths.max())}."
+            )
+        return valid_lengths
+
+    @staticmethod
+    def _flatten_stacked_prefixes(arr: np.ndarray, valid_lengths: np.ndarray) -> np.ndarray:
+        return np.concatenate(
+            [arr[traj_idx, : int(length)] for traj_idx, length in enumerate(valid_lengths.tolist())],
+            axis=0,
+        )
+
     def _load_stacked_motion(self, data: np.lib.npyio.NpzFile, motion_file: str):
         joint_pos = self._normalize_stacked_vector_array("joint_pos", data["joint_pos"])
         num_trajectories, time_steps, joint_dim = map(int, joint_pos.shape)
-        self._set_trajectory_lengths([time_steps] * num_trajectories, motion_file)
+        valid_lengths = self._extract_valid_lengths_from_stacked(data, num_trajectories, time_steps, motion_file)
+        self._set_trajectory_lengths(valid_lengths.tolist(), motion_file)
         self._set_fps(self._extract_fps_values_from_stacked(data, num_trajectories), motion_file)
-        self.joint_pos = self._to_device_tensor(joint_pos.reshape(-1, joint_dim))
+        self.joint_pos = self._to_device_tensor(self._flatten_stacked_prefixes(joint_pos, valid_lengths))
         del joint_pos
 
         joint_vel = self._normalize_stacked_vector_array("joint_vel", data["joint_vel"])
@@ -138,16 +169,20 @@ class MotionLoader:
                 f"`joint_vel` shape {joint_vel.shape} must match `joint_pos` shape "
                 f"({num_trajectories}, {time_steps}, {joint_dim})."
             )
-        self.joint_vel = self._to_device_tensor(joint_vel.reshape(-1, joint_dim))
+        self.joint_vel = self._to_device_tensor(self._flatten_stacked_prefixes(joint_vel, valid_lengths))
         del joint_vel
 
-        self._body_pos_w = self._load_stacked_body_tensor(data, "body_pos_w", (num_trajectories, time_steps), 3)
-        self._body_quat_w = self._load_stacked_body_tensor(data, "body_quat_w", (num_trajectories, time_steps), 4)
+        self._body_pos_w = self._load_stacked_body_tensor(
+            data, "body_pos_w", (num_trajectories, time_steps), 3, valid_lengths
+        )
+        self._body_quat_w = self._load_stacked_body_tensor(
+            data, "body_quat_w", (num_trajectories, time_steps), 4, valid_lengths
+        )
         self._body_lin_vel_w = self._load_stacked_body_tensor(
-            data, "body_lin_vel_w", (num_trajectories, time_steps), 3
+            data, "body_lin_vel_w", (num_trajectories, time_steps), 3, valid_lengths
         )
         self._body_ang_vel_w = self._load_stacked_body_tensor(
-            data, "body_ang_vel_w", (num_trajectories, time_steps), 3
+            data, "body_ang_vel_w", (num_trajectories, time_steps), 3, valid_lengths
         )
 
         action_key = next((key for key in self._ACTION_TRAJ_KEYS if key in data.files), None)
@@ -162,7 +197,7 @@ class MotionLoader:
                 f"`{action_key}` shape {action.shape} must match `joint_pos` shape "
                 f"({num_trajectories}, {time_steps}, {joint_dim})."
             )
-        self.joint_action = self._to_device_tensor(action.reshape(-1, joint_dim))
+        self.joint_action = self._to_device_tensor(self._flatten_stacked_prefixes(action, valid_lengths))
 
     def _load_stacked_body_tensor(
         self,
@@ -170,6 +205,7 @@ class MotionLoader:
         key: str,
         expected_shape: tuple[int, int],
         expected_tail_dim: int,
+        valid_lengths: np.ndarray,
     ) -> torch.Tensor:
         arr = self._normalize_stacked_body_array(key, data[key], expected_tail_dim=expected_tail_dim)
         num_trajectories, time_steps = expected_shape
@@ -179,9 +215,7 @@ class MotionLoader:
             )
         motion_body_indexes = self._motion_body_indexes_for_count(int(arr.shape[2]))
         arr = arr[:, :, motion_body_indexes, :]
-        return self._to_device_tensor(
-            arr.reshape(num_trajectories * time_steps, len(motion_body_indexes), expected_tail_dim)
-        )
+        return self._to_device_tensor(self._flatten_stacked_prefixes(arr, valid_lengths))
 
     def _build_flat_buffers(self):
         offsets = [0]
@@ -358,6 +392,11 @@ class MotionLoader:
         with np.load(motion_file, allow_pickle=True) as data:
             if "joint_pos" in data.files:
                 num_trajectories = cls._infer_num_trajectories_from_stacked(data)
+                joint_pos = cls._normalize_stacked_vector_array("joint_pos", data["joint_pos"])
+                time_steps = int(joint_pos.shape[1])
+                valid_lengths = cls._extract_valid_lengths_from_stacked(
+                    data, num_trajectories, time_steps, motion_file
+                )
                 fps_values = cls._extract_fps_values_from_stacked(data, num_trajectories)
                 entries = []
                 # Compatibility path for callers that still want per-trajectory numpy dictionaries.
@@ -375,7 +414,7 @@ class MotionLoader:
                             trajectory_idx=trajectory_idx,
                         )
                         if selected is not None:
-                            motion[key] = selected
+                            motion[key] = selected[: int(valid_lengths[trajectory_idx])]
                     cls._validate_motion_dict(motion, source_key=f"trajectory{trajectory_idx}")
                     entries.append(motion)
                 return entries, fps_values
