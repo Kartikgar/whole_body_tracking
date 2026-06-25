@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+
+from sim2sim_genesis.constants import DEFAULT_NEXT_LAB_DATE
 
 
 @dataclass(slots=True)
@@ -45,3 +48,24 @@ class OutputTargets:
     output_csv: str | None
     output_json: str | None
     output_motion_npz: str | None
+
+
+def merged_policy_path_tag(policy_path: str) -> str:
+    """Sanitize ``policy_path`` for artifact filenames (matches video naming)."""
+
+    return policy_path.replace("/", "_")[:-5]
+
+
+def default_eval_artifact_path(
+    run_timestamp: str,
+    policy_path: str,
+    extension: str,
+    *,
+    output_dir: str | None = None,
+) -> str:
+    """Build a default sim2sim eval artifact path using the video filename convention."""
+
+    directory = output_dir or os.path.join("logs", "sim2sim_eval", DEFAULT_NEXT_LAB_DATE)
+    ext = extension if extension.startswith(".") else f".{extension}"
+    stem = f"{run_timestamp}_{merged_policy_path_tag(policy_path)}"
+    return os.path.join(directory, f"{stem}{ext}")

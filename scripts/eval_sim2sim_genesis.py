@@ -13,10 +13,9 @@ from datetime import datetime
 import numpy as np
 import torch
 
-from sim2sim_genesis.config import EvalConfig, OutputTargets
+from sim2sim_genesis.config import EvalConfig, OutputTargets, default_eval_artifact_path
 from sim2sim_genesis.constants import (
     DEFAULT_G1_URDF,
-    DEFAULT_NEXT_LAB_DATE,
     DEFAULT_REFERENCE_MARKER_RADIUS,
     DEFAULT_STARTUP_QPOS_JOINT_RANGE,
 )
@@ -174,7 +173,7 @@ def validate_inputs(args: argparse.Namespace) -> None:
             raise ValueError(f"--startup_qpos_joint_range low must be <= high. Got {low} > {high}.")
 
 
-def resolve_output_targets(args: argparse.Namespace, run_timestamp: str, policy_name: str) -> OutputTargets:
+def resolve_output_targets(args: argparse.Namespace, run_timestamp: str, policy_path: str) -> OutputTargets:
     """Resolve CSV, JSON, and NPZ output paths for the current invocation."""
 
     output_csv = None
@@ -183,20 +182,21 @@ def resolve_output_targets(args: argparse.Namespace, run_timestamp: str, policy_
 
     effective_compute_metrics = bool(args.compute_metrics or args.record_motion)
     if effective_compute_metrics:
-        output_csv = args.output_csv or os.path.join(
-            "logs", "sim2sim_eval", DEFAULT_NEXT_LAB_DATE, f"{policy_name}_genesis_metrics.csv"
-        )
-        output_json = args.output_json or os.path.join(
-            "logs", "sim2sim_eval", DEFAULT_NEXT_LAB_DATE, f"{policy_name}_genesis_metrics.json"
-        )
-        output_csv = append_timestamp_to_path(output_csv, run_timestamp)
-        output_json = append_timestamp_to_path(output_json, run_timestamp)
+        if args.output_csv is not None:
+            output_csv = append_timestamp_to_path(args.output_csv, run_timestamp)
+        else:
+            output_csv = default_eval_artifact_path(run_timestamp, policy_path, ".csv")
+
+        if args.output_json is not None:
+            output_json = append_timestamp_to_path(args.output_json, run_timestamp)
+        else:
+            output_json = default_eval_artifact_path(run_timestamp, policy_path, ".json")
 
     if args.record_motion:
-        output_motion_npz = args.output_motion_npz or os.path.join(
-            "logs", "sim2sim_eval", DEFAULT_NEXT_LAB_DATE, f"{policy_name}_motion_dataset.npz"
-        )
-        output_motion_npz = append_timestamp_to_path(output_motion_npz, run_timestamp)
+        if args.output_motion_npz is not None:
+            output_motion_npz = append_timestamp_to_path(args.output_motion_npz, run_timestamp)
+        else:
+            output_motion_npz = default_eval_artifact_path(run_timestamp, policy_path, ".npz")
 
     return OutputTargets(
         output_csv=output_csv,
@@ -350,9 +350,8 @@ def main() -> None:
     args = parse_args()
     validate_inputs(args)
 
-    policy_name = os.path.basename(args.policy_path).replace(".onnx", "")
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    outputs = resolve_output_targets(args, run_timestamp, policy_name)
+    outputs = resolve_output_targets(args, run_timestamp, args.policy_path)
     config = build_eval_config(args, outputs)
     runner = build_runner(config)
     result = runner.evaluate(run_timestamp)

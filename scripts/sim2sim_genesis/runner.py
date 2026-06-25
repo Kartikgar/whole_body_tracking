@@ -7,8 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from sim2sim_genesis.config import EvalConfig
-from sim2sim_genesis.constants import DEFAULT_NEXT_LAB_DATE
+from sim2sim_genesis.config import EvalConfig, default_eval_artifact_path
 from sim2sim_genesis.domain_randomization import DomainRandomizer
 from sim2sim_genesis.metrics import TrackingMetricsEvaluator, compute_metrics_lite
 from sim2sim_genesis.observations import ObservationBuilder
@@ -302,8 +301,9 @@ class Sim2SimRunner:
                 break
 
         if self.scene.camera is not None:
-            merged_policy_path = self.config.policy_path.replace("/", "_")[:-2]
-            filename = self.config.video_name or f"logs/sim2sim_eval/{DEFAULT_NEXT_LAB_DATE}/{run_timestamp}_{merged_policy_path}.mp4"
+            filename = self.config.video_name or default_eval_artifact_path(
+                run_timestamp, self.config.policy_path, ".mp4"
+            )
             self.scene.stop_recording(filename=filename, fps=round(1.0 / self.config.control_dt))
         if step_pbar is not None:
             step_pbar.close()
