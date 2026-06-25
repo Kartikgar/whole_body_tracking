@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tracking metrics reference</title>
+  <style>
+    :root {
+      --bg: #fafbfc;
+      --text: #1f2328;
+      --muted: #57606a;
+      --accent: #0969da;
+      --code-bg: #f6f8fa;
+      --border: #d0d7de;
+      --warn-bg: #fff8e6;
+      --warn-border: #d4a72c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      line-height: 1.65;
+      max-width: 52rem;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 4rem;
+      background: var(--bg);
+      color: var(--text);
+    }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 600;
+      line-height: 1.25;
+      margin-bottom: 0.5rem;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.95rem;
+      margin-bottom: 2rem;
+    }
+    h2 {
+      font-size: 1.25rem;
+      margin-top: 2.25rem;
+      padding-bottom: 0.35rem;
+      border-bottom: 1px solid var(--border);
+    }
+    h3 {
+      font-size: 1.05rem;
+      margin-top: 1.5rem;
+    }
+    p { margin: 0.85rem 0; }
+    .muted { color: var(--muted); }
+    code, pre {
+      font-family: ui-monospace, "Cascadia Code", monospace;
+      font-size: 0.88em;
+    }
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem 1.1rem;
+      overflow-x: auto;
+      line-height: 1.45;
+    }
+    .formula {
+      background: var(--code-bg);
+      border-left: 3px solid var(--accent);
+      padding: 0.75rem 1rem;
+      margin: 1rem 0;
+      border-radius: 0 6px 6px 0;
+      font-family: ui-monospace, monospace;
+      font-size: 0.9rem;
+    }
+    ul { padding-left: 1.35rem; }
+    li { margin: 0.4rem 0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.92rem;
+      margin: 1rem 0;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 0.45rem 0.65rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: var(--code-bg); }
+    .diagram {
+      background: var(--code-bg);
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin: 1.25rem 0;
+      font-family: ui-monospace, monospace;
+      font-size: 0.82rem;
+      line-height: 1.4;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout {
+      background: var(--warn-bg);
+      border: 1px solid var(--warn-border);
+      border-radius: 8px;
+      padding: 0.85rem 1rem;
+      margin: 1rem 0;
+      font-size: 0.95rem;
+    }
+    a { color: var(--accent); }
+    footer {
+      margin-top: 3rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+
+<h1>Tracking metrics reference</h1>
+<p class="subtitle">
+  Definitions for motion-tracking quality metrics used in Isaac Lab training, Genesis sim2sim evaluation,
+  and transfer-validation tooling. Primary implementation:
+  <code>scripts/sim2sim_genesis/metrics.py</code>.
+</p>
+
+<h2>1. Where metrics appear</h2>
+<table>
+  <thead>
+    <tr><th>Context</th><th>Module</th><th>When computed</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Genesis closed-loop sim2sim</strong></td>
+      <td><code>sim2sim_genesis/metrics.py</code> via <code>Sim2SimRunner</code></td>
+      <td>Each control step during ONNX policy rollout in Genesis (<code>--compute_metrics</code>)</td>
+    </tr>
+    <tr>
+      <td><strong>Legacy monolithic evaluator</strong></td>
+      <td><code>scripts/rsl_rl/evaluate_sim2sim_genesis.py</code></td>
+      <td>Same semantics as modular metrics; duplicated helpers for backward compatibility</td>
+    </tr>
+    <tr>
+      <td><strong>Isaac Lab training / play</strong></td>
+      <td><code>tasks/tracking/mdp/commands.py</code>, <code>rewards.py</code></td>
+      <td>Each env step inside <code>MotionCommand._update_metrics()</code> and PPO reward terms</td>
+    </tr>
+    <tr>
+      <td><strong>Open-loop transfer replay</strong></td>
+      <td><code>sim2sim_genesis/openloop_replay.py</code></td>
+      <td>Per trajectory after Isaac→Genesis base-only replay (not in <code>metrics.py</code>)</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>Reference vs prediction.</strong> In closed-loop sim2sim, the <em>reference</em> is the trajectory
+  emitted by the exported ONNX policy at each <code>time_step</code> (joint/body states embedded in the graph).
+  The <em>prediction</em> is the actual Genesis robot state after PD control. In Isaac training, reference
+  comes from the motion NPZ and prediction from the simulated robot.
+</div>
+
+<h2>2. Coordinate conventions</h2>
+
+<h3>2.1 Anchor body</h3>
+<p>
+  Most tracking metrics compare an <strong>anchor</strong> link (typically <code>torso_link</code> on G1,
+  configured as <code>anchor_body_name</code> in ONNX metadata and the motion command).
+  Anchor position/orientation errors are computed in <strong>world frame</strong>.
+</p>
+
+<h3>2.2 Yaw-aligned relative body targets</h3>
+<p>
+  Body pose rewards and <code>error_body_pos</code> / <code>error_body_rot</code> use
+  <strong>relative targets</strong> built in <code>TrackingMetricsEvaluator.compute_body_relative_targets()</code>
+  (mirrors Isaac <code>MotionCommand</code> logic):
+</p>
+<ul>
+  <li>Horizontal position: align reference bodies to the robot anchor XY, keep reference anchor height Z.</li>
+  <li>Orientation: apply yaw-only delta between robot and reference anchor quaternions.</li>
+  <li>Result: <code>body_pos_relative</code>, <code>body_quat_relative</code> — “what the bodies should be if the robot matched reference anchor height and yaw.”</li>
+</ul>
+
+<div class="diagram">world reference bodies
+        │
+        ▼  yaw-only + XY anchor alignment
+body_pos_relative  ──compare──►  robot body_pos_w (world)
+</div>
+
+<h3>2.3 Root index for MPJPE</h3>
+<p>
+  <code>compute_metrics_lite(..., root_idx=0)</code> subtracts body index 0 (pelvis / root link in policy
+  body order) before computing local MPJPE. Rollout summaries additionally apply a
+  <strong>spatial offset alignment</strong> at t=0 so parallel env spacing does not inflate global MPJPE.
+</p>
+
+<h2>3. Per-step tracking errors (<code>tracking_metrics</code>)</h2>
+<p>
+  <code>TrackingMetricsEvaluator.tracking_metrics(state, reference)</code> returns scalar errors for one env
+  at one timestep. Shapes: state/reference dicts hold <code>joint_*</code> vectors and per-body
+  <code>body_*_w</code> arrays indexed by policy <code>body_names</code>.
+</p>
+
+<table>
+  <thead>
+    <tr><th>Key</th><th>Definition</th><th>Units</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>error_anchor_pos</code></td>
+      <td><code>‖p_ref_anchor − p_robot_anchor‖₂</code></td>
+      <td>m</td>
+    </tr>
+    <tr>
+      <td><code>error_anchor_rot</code></td>
+      <td>Quaternion error magnitude between reference and robot anchor orientations</td>
+      <td>rad</td>
+    </tr>
+    <tr>
+      <td><code>error_body_pos</code></td>
+      <td>Mean over bodies of <code>‖body_pos_relative − body_pos_robot‖₂</code></td>
+      <td>m</td>
+    </tr>
+    <tr>
+      <td><code>error_body_rot</code></td>
+      <td>Mean over bodies of quaternion error between relative target and robot body orientations</td>
+      <td>rad</td>
+    </tr>
+    <tr>
+      <td><code>error_joint_pos</code></td>
+      <td><code>‖q_ref − q_robot‖₂</code> (Euclidean norm over all policy joints)</td>
+      <td>rad</td>
+    </tr>
+    <tr>
+      <td><code>error_joint_vel</code></td>
+      <td><code>‖q̇_ref − q̇_robot‖₂</code></td>
+      <td>rad/s</td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="muted">
+  Isaac <code>MotionCommand._update_metrics()</code> logs the same error family plus
+  <code>error_anchor_lin_vel</code>, <code>error_anchor_ang_vel</code>,
+  <code>error_body_lin_vel</code>, and <code>error_body_ang_vel</code> (not exported as scalars from
+  <code>tracking_metrics</code>, but used in reward exponentials below).
+</p>
+
+<h2>4. Reward-shaped terms (<code>rew_tracking_*</code>)</h2>
+<p>
+  Genesis metrics mirror Isaac exponential tracking rewards from
+  <code>tracking_env_cfg.py</code> / <code>rewards.py</code>. Each term is
+  <code>exp(−error / std²)</code> in [0, 1], higher is better.
+</p>
+
+<table>
+  <thead>
+    <tr><th>Key</th><th>Isaac reward name</th><th>std</th><th>Weight in total</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>rew_tracking_anchor_pos</code></td>
+      <td><code>motion_global_anchor_pos</code></td>
+      <td>0.3 m</td>
+      <td>0.5</td>
+    </tr>
+    <tr>
+      <td><code>rew_tracking_anchor_ori</code></td>
+      <td><code>motion_global_anchor_ori</code></td>
+      <td>0.4 rad</td>
+      <td>0.5</td>
+    </tr>
+    <tr>
+      <td><code>rew_tracking_body_pos</code></td>
+      <td><code>motion_body_pos</code> (relative)</td>
+      <td>0.3 m</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <td><code>rew_tracking_body_ori</code></td>
+      <td><code>motion_body_ori</code> (relative)</td>
+      <td>0.4 rad</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <td><code>rew_tracking_body_lin_vel</code></td>
+      <td><code>motion_body_lin_vel</code></td>
+      <td>1.0 m/s</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <td><code>rew_tracking_body_ang_vel</code></td>
+      <td><code>motion_body_ang_vel</code></td>
+      <td>3.14 rad/s</td>
+      <td>1.0</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="formula">tracking_reward_total =
+  0.5·rew_tracking_anchor_pos + 0.5·rew_tracking_anchor_ori
+  + rew_tracking_body_pos + rew_tracking_body_ori
+  + rew_tracking_body_lin_vel + rew_tracking_body_ang_vel</div>
+
+<p>
+  During Genesis rollout, <code>Sim2SimRunner</code> accumulates per-step values and reports
+  <code>{key}_mean</code> in the output JSON (divided by total steps). Maximum per-step
+  <code>tracking_reward_total</code> is 5.0 when all exponentials equal 1.
+</p>
+
+<h2>5. Termination checks</h2>
+<p>
+  <code>TrackingMetricsEvaluator.termination_check()</code> mirrors Isaac
+  <code>TerminationsCfg.anchor_pos</code> / <code>anchor_ori</code> thresholds used during metric rollouts:
+</p>
+<table>
+  <thead>
+    <tr><th>Reason string</th><th>Condition</th><th>Isaac threshold</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>anchor_pos_z</code></td>
+      <td><code>|z_ref_anchor − z_robot_anchor| &gt; 0.5</code></td>
+      <td>Training uses 0.25 m (stricter); metrics use 0.5 m in Genesis code</td>
+    </tr>
+    <tr>
+      <td><code>anchor_ori</code></td>
+      <td>|Δ projected gravity z| &gt; 0.8 between reference and robot anchor</td>
+      <td>Same 0.8 threshold in Isaac <code>bad_anchor_ori</code></td>
+    </tr>
+    <tr>
+      <td><code>completed</code></td>
+      <td>No termination triggered</td>
+      <td>—</td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  Returned fields: <code>terminated</code> (0/1 float) and <code>termination_reason</code> (string).
+  Multi-env metric collection tracks per-env end steps when termination fires early.
+</p>
+
+<h2>6. Trajectory-level pose metrics (<code>compute_metrics_lite</code>)</h2>
+<p>
+  ASAP-style metrics on body position sequences, shape <code>[T, B, 3]</code>.
+  Used at end of each metric rollout in <code>Sim2SimRunner</code> (after root-offset alignment).
+</p>
+
+<table>
+  <thead>
+    <tr><th>Key</th><th>Name</th><th>Definition</th><th>Units</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>mpjpe_g</code></td>
+      <td>MPJPE global</td>
+      <td>Per-frame, per-body Euclidean distance in world frame; ×1000</td>
+      <td>mm</td>
+    </tr>
+    <tr>
+      <td><code>mpjpe_l</code></td>
+      <td>MPJPE local</td>
+      <td>Same after subtracting root body position at each frame</td>
+      <td>mm</td>
+    </tr>
+    <tr>
+      <td><code>vel_dist</code></td>
+      <td>Velocity distance</td>
+      <td>Mean over bodies of <code>‖Δp_pred − Δp_ref‖</code> on finite differences; ×1000</td>
+      <td>mm/frame</td>
+    </tr>
+    <tr>
+      <td><code>accel_dist</code></td>
+      <td>Acceleration distance</td>
+      <td>Mean over bodies of central-difference acceleration error; ×1000</td>
+      <td>mm/frame²</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="formula">mpjpe_g[t,b] = 1000 · ‖p_ref[t,b] − p_pred[t,b]‖₂
+mpjpe_l[t,b] = 1000 · ‖(p_ref[t,b] − p_ref[t,root]) − (p_pred[t,b] − p_pred[t,root])‖₂</div>
+
+<p>
+  JSON export reports <code>mpjpe_mean</code>, <code>mpjpe_l_mean</code>, <code>vel_dist_mean</code>,
+  <code>accel_dist_mean</code> plus <code>_std</code> and <code>_succ_*</code> variants aggregated over
+  rollouts. A rollout counts as success when it runs within 5 steps of <code>max_steps</code>.
+</p>
+
+<h2>7. Isaac-only logged metrics</h2>
+<p>
+  During training/play, <code>MotionCommand.metrics</code> also tracks sampling diagnostics
+  (not in Genesis <code>metrics.py</code>):
+</p>
+<ul>
+  <li><code>sampling_entropy</code> — normalized entropy of adaptive motion-bin sampling probabilities</li>
+  <li><code>sampling_top1_prob</code> — largest bin probability</li>
+  <li><code>sampling_top1_bin</code> — normalized index of the top bin</li>
+</ul>
+
+<h2>8. Open-loop transfer metrics</h2>
+<p>
+  When comparing Isaac source states to Genesis base-only replay
+  (<code>openloop_replay.py</code> / <code>replay_openloop_genesis.py</code>), metrics differ from
+  closed-loop tracking — they measure <strong>cross-simulator state drift</strong>, not ONNX reference tracking.
+</p>
+<table>
+  <thead>
+    <tr><th>Key</th><th>Definition</th><th>Units</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>rmse_abs</code></td>
+      <td>RMSE of joint position: Genesis replay vs Isaac source</td>
+      <td>rad</td>
+    </tr>
+    <tr>
+      <td><code>rmse_rel</code></td>
+      <td>RMSE after subtracting each side’s default joint pose</td>
+      <td>rad</td>
+    </tr>
+    <tr>
+      <td><code>max_abs</code> / <code>max_rel</code></td>
+      <td>Max absolute joint error (absolute / relative)</td>
+      <td>rad</td>
+    </tr>
+    <tr>
+      <td><code>body_rmse</code> / <code>body_max</code></td>
+      <td>RMSE / max of world-frame <code>body_pos_w</code> error</td>
+      <td>m</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>9. Implementation map</h2>
+<pre>scripts/sim2sim_genesis/metrics.py
+├── compute_error_vel / compute_error_accel
+├── compute_metrics_lite          → mpjpe_g, mpjpe_l, vel_dist, accel_dist
+└── TrackingMetricsEvaluator
+    ├── compute_body_relative_targets
+    ├── termination_check         → anchor_pos_z, anchor_ori
+    └── tracking_metrics          → error_*, rew_tracking_*, tracking_reward_total
+
+source/.../tasks/tracking/mdp/
+├── commands.py                   → MotionCommand._update_metrics (Isaac tensors)
+├── rewards.py                    → exponential reward terms (training)
+└── terminations.py               → bad_anchor_pos / bad_anchor_ori (Isaac env)
+
+scripts/sim2sim_genesis/runner.py → per-step tracking_metrics + rollout compute_metrics_lite
+scripts/sim2sim_genesis/openloop_replay.py → transfer RMSE metrics</pre>
+
+<h2>10. Quick interpretation guide</h2>
+<ul>
+  <li><strong>Low <code>error_body_pos</code></strong> — robot keypoints match yaw-relative motion targets.</li>
+  <li><strong>High <code>tracking_reward_total</code></strong> — same information as rewards, useful for comparing simulators step-by-step.</li>
+  <li><strong>Low MPJPE (mm)</strong> — good whole-body pose match over a rollout; local MPJPE ignores global translation.</li>
+  <li><strong><code>termination_reason ≠ completed</code></strong> — fall / orientation failure; rollout may be truncated in metric aggregation.</li>
+  <li><strong>Transfer <code>rmse_rel</code></strong> — primary joint metric for Isaac(base+δ) vs Genesis(base) validation; lower is better.</li>
+</ul>
+
+<footer>
+  Source: <code>whole_body_tracking/scripts/sim2sim_genesis/metrics.py</code> and related tracking MDP code.
+  See also <a href="genesis_sim2sim_evaluator.html">Genesis sim2sim evaluator</a> for rollout workflow.
+</footer>
+
+</body>
+</html>
