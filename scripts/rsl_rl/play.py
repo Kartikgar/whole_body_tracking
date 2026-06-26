@@ -215,6 +215,13 @@ import whole_body_tracking.tasks  # noqa: F401
 from whole_body_tracking.utils.exporter import attach_onnx_metadata, export_motion_policy_as_onnx
 from whole_body_tracking.utils.my_on_policy_runner import MotionOnPolicyRunner as OnPolicyRunner
 
+from source_metrics import (
+    SourceSimMetricsTracker,
+    capture_motion_reference,
+    infer_source_metric_mode,
+    resolve_motion_anchor_index,
+    resolve_motion_body_names,
+)
 from utils import DEFAULT_STATE_ACTION_KEYS, StateActionTrajectoryRecorder
 
 ANKLE_DELTA_ACTION_JOINT_NAMES = [
@@ -1262,6 +1269,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print("[INFO]: Skipping ONNX export for tasks without a motion command.")
     obs_split_cache: dict[str, tuple[list[str], list[int], list[str]]] = {}
     shutdown_requested_by_target = False
+    source_metrics_tracker = None
+    source_metrics_output_path = None
+    if _has_motion_command(env_cfg):
+        source_metric_mode = infer_source_metric_mode(args_cli.task)
+        source_metric_body_names = resolve_motion_body_names(env.unwrapped)
+        if source_metric_body_names:
+            source_metrics_tracker = SourceSimMetricsTracker(
+                num_envs=env.num_envs,
+                mode=source_metric_mode,
+                body_names=source_metric_body_names,
+                anchor_idx=resolve_motion_anchor_index(env.unwrapped, source_metric_body_names),
+                root_idx=0,
+            )
+            source_metrics_output_path = os.path.join(
+                os.path.dirname(resume_path),
+                "source_metrics",
+                f"{ckpt_stem if ckpt_stem else 'policy'}_source_metrics_{timestamp}.json",
+            )
+            print(
+                "[INFO]: Source-sim metrics enabled: "
+                f"mode={source_metric_mode}, timing={source_metrics_tracker.reference_timing_description}."
+            )
+        else:
+            print("[WARN]: Source-sim metrics disabled because motion body names could not be resolved.")
 
     # Force a real env reset before the first policy step, then patch up the motion-command caches
     # that are otherwise only refreshed after the first command-manager compute.
@@ -1333,6 +1364,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     )
                 state_action_recorder.capture_initial_if_new_traj(pre_step_state)
 
+            source_metrics_pre_reference = None
+            if source_metrics_tracker is not None and source_metrics_tracker.mode == "base_tracking":
+                source_metrics_pre_reference = capture_motion_reference(env.unwrapped)
+
             # env stepping
             state_action_step_actions = actions
             if state_action_recorder is not None and state_action_log_motion_joint_action:
@@ -1346,28 +1381,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             obs, _, dones, _ = env.step(actions)
 
-            if state_action_recorder is not None:
-                state_components = _resolve_robot_state_components_for_logging(env.unwrapped)
-                if len(state_components) == 0:
-                    raise RuntimeError(
-                        "State-action trajectory logging is enabled but robot state tensors could not be resolved."
-                    )
-                auxiliary_actions = None
-                if state_action_recorder.secondary_action_keys:
-                    if delta_actions is None:
-                        delta_actions = torch.zeros_like(actions)
-                    auxiliary_actions = {
-                        "base_actions": actions,
-                        "delta_actions": delta_actions,
-                    }
-                state_action_recorder.append_step(
-                    state_components,
-                    state_action_step_actions,
-                    auxiliary_actions=auxiliary_actions,
-                )
-
-            if delta_dataset_recorder is not None or state_action_recorder is not None:
-                done_source = dones
+            done_source = dones
+            if delta_dataset_recorder is not None or state_action_recorder is not None or source_metrics_tracker is not None:
                 termination_manager = getattr(env.unwrapped, "termination_manager", None)
                 if termination_manager is not None and hasattr(termination_manager, "terminated"):
                     term_done = termination_manager.terminated
@@ -1385,6 +1400,56 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     except Exception:
                         pass
                 prev_motion_time_steps = current_motion_time_steps
+
+            post_step_state_components = None
+            if state_action_recorder is not None or source_metrics_tracker is not None:
+                post_step_state_components = _resolve_robot_state_components_for_logging(env.unwrapped)
+                if len(post_step_state_components) == 0:
+                    if state_action_recorder is not None:
+                        raise RuntimeError(
+                            "State-action trajectory logging is enabled but robot state tensors could not be resolved."
+                        )
+                    raise RuntimeError("Source-sim metrics are enabled but robot state tensors could not be resolved.")
+
+            if source_metrics_tracker is not None:
+                if source_metrics_tracker.mode == "delta_openloop":
+                    source_metrics_reference = capture_motion_reference(env.unwrapped)
+                else:
+                    source_metrics_reference = source_metrics_pre_reference
+                if source_metrics_reference is None:
+                    raise RuntimeError("Source-sim metrics failed to capture a motion reference snapshot.")
+                metrics_done_mask = done_source.to(device=env.unwrapped.device, dtype=torch.bool)
+                if metrics_done_mask.ndim == 0:
+                    metrics_done_mask = metrics_done_mask.reshape(1)
+                elif metrics_done_mask.ndim > 1:
+                    metrics_done_mask = metrics_done_mask.reshape(metrics_done_mask.shape[0], -1).any(dim=1)
+                active_mask = torch.logical_not(metrics_done_mask)
+                source_metrics_tracker.append_step(
+                    post_step_state_components,
+                    source_metrics_reference,
+                    active_mask=active_mask,
+                )
+                source_metrics_tracker.finalize_done(done_source)
+
+            if state_action_recorder is not None:
+                state_components = post_step_state_components
+                if len(state_components) == 0:
+                    raise RuntimeError(
+                        "State-action trajectory logging is enabled but robot state tensors could not be resolved."
+                    )
+                auxiliary_actions = None
+                if state_action_recorder.secondary_action_keys:
+                    if delta_actions is None:
+                        delta_actions = torch.zeros_like(actions)
+                    auxiliary_actions = {
+                        "base_actions": actions,
+                        "delta_actions": delta_actions,
+                    }
+                state_action_recorder.append_step(
+                    state_components,
+                    state_action_step_actions,
+                    auxiliary_actions=auxiliary_actions,
+                )
 
             if delta_dataset_recorder is not None:
                 gained = delta_dataset_recorder.finalize_done(done_source)
@@ -1451,6 +1516,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 f"(trajectories={state_action_recorder.saved_count}, "
                 f"motion_length={state_action_recorder.saved_motion_length})."
             )
+
+    if source_metrics_tracker is not None and source_metrics_output_path is not None:
+        source_metrics_tracker.finalize_open()
+        source_metrics_tracker.print_summary()
+        saved_metrics_path = source_metrics_tracker.save_summary(source_metrics_output_path)
+        print(f"[INFO]: Saved source-sim metrics to {saved_metrics_path}")
 
     # Clean up any externally injected action buffers.
     ppo_runner._clear_delta_action_buffer()
