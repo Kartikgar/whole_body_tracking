@@ -1,7 +1,7 @@
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 
-NEXT_LAB_DATE = "2026.06.24"
+NEXT_LAB_DATE = "2026.07.01"
 
 @configclass
 class G1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
@@ -34,8 +34,8 @@ class G1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 @configclass
 class G1FlatDeltaActPPORunnerCfg(G1FlatPPORunnerCfg):
     experiment_name = f"{NEXT_LAB_DATE}/g1_delta_policies"
-    max_iterations = 3000
-    save_interval = 300
+    max_iterations = 2000
+    save_interval = 200
 
 LOW_FREQ_SCALE = 0.5
 
