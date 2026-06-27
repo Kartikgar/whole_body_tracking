@@ -277,7 +277,10 @@ class Sim2SimRunner:
                         metrics_pbar.update(1)
 
             if self.trajectory_recorder is not None:
-                gained = self.trajectory_recorder.finalize_rollout()
+                valid_lengths = None
+                if metrics_enabled:
+                    valid_lengths = np.clip(env_end_step, 1, max(steps_this_rollout, 1)).astype(np.int32)
+                gained = self.trajectory_recorder.finalize_rollout(valid_lengths=valid_lengths)
                 if gained > 0 and traj_pbar is not None and target_for_npz > 0:
                     remaining = max(target_for_npz - int(traj_pbar.n), 0)
                     traj_pbar.update(min(gained, remaining))

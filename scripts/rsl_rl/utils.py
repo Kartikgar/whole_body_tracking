@@ -165,13 +165,21 @@ class StateActionTrajectoryRecorder:
             gained += self._finalize_env_traj(env_id)
         return gained
 
-    def finalize_open(self):
+    def finalize_open(self, valid_lengths: Sequence[int] | np.ndarray | None = None):
+        valid_lengths_array = None
+        if valid_lengths is not None:
+            valid_lengths_array = np.asarray(valid_lengths, dtype=np.int32).reshape(-1)
+            if valid_lengths_array.shape[0] != self.num_envs:
+                raise AssertionError(
+                    f"Expected valid_lengths shape [{self.num_envs}], got {valid_lengths_array.shape}."
+                )
         for env_id in range(self.num_envs):
             if self.has_reached_target():
                 break
-            self._finalize_env_traj(env_id)
+            valid_length = None if valid_lengths_array is None else int(valid_lengths_array[env_id])
+            self._finalize_env_traj(env_id, valid_length=valid_length)
 
-    def _finalize_env_traj(self, env_id: int) -> int:
+    def _finalize_env_traj(self, env_id: int, valid_length: int | None = None) -> int:
         if self.has_reached_target():
             return 0
         if len(self.traj_buffers[env_id][self.action_key]) == 0:
@@ -180,6 +188,15 @@ class StateActionTrajectoryRecorder:
 
         keys = [*self.component_keys, *self.all_action_keys]
         traj = {key: np.stack(self.traj_buffers[env_id][key], axis=0).astype(np.float32) for key in keys}
+        raw_length = int(traj[self.action_key].shape[0])
+        if valid_length is None:
+            valid_length = raw_length
+        valid_length = int(valid_length)
+        if valid_length <= 0 or valid_length > raw_length:
+            raise AssertionError(
+                f"Invalid valid_length={valid_length} for env {env_id}; expected value in [1, {raw_length}]."
+            )
+        traj["_valid_length"] = np.array(valid_length, dtype=np.int32)
         if self.record_initial_state:
             pending = self.pending_initial_states[env_id]
             if pending is None:
@@ -251,7 +268,10 @@ class StateActionTrajectoryRecorder:
                 initial_rows = [traj[initial_key] for traj in trajs]
                 payload[initial_key] = np.stack(initial_rows, axis=0).astype(np.float32)
 
-        raw_valid_lengths = np.asarray([int(traj[self.action_key].shape[0]) for traj in trajs], dtype=np.int32)
+        raw_valid_lengths = np.asarray(
+            [int(traj.get("_valid_length", int(traj[self.action_key].shape[0]))) for traj in trajs],
+            dtype=np.int32,
+        )
         payload["valid_lengths"] = raw_valid_lengths
 
         if metadata:

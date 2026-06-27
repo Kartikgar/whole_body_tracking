@@ -190,6 +190,7 @@ class G1FlatDeltaAOpenLoopEnvCfg(G1FlatEnvCfg):
         self.commands.motion.joint_position_range = (0.0, 0.0)
         self.commands.motion.sample_trajectories = True
         self.commands.motion.equal_trajectory_sampling = True
+        self.commands.motion.required_future_steps = 1
         self.observations.policy = DeltaOpenLoopPolicyObsCfg()
         self.observations.critic = DeltaOpenLoopCriticObsCfg()
         self.actions.joint_pos = mdp.DeltaJointPositionActionCfg(

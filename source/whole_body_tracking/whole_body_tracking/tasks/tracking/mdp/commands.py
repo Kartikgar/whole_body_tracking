@@ -806,8 +806,10 @@ class MotionCommand(CommandTerm):
             self.time_steps[env_ids] = 0
             return
         lengths = self.motion.trajectory_time_step_total[self.trajectory_ids[env_ids]]
-        sampled = (sample_uniform(0.0, 1.0, (len(env_ids),), device=self.device) * lengths.float()).long()
-        self.time_steps[env_ids] = torch.minimum(sampled, torch.clamp(lengths - 1, min=0))
+        max_start_time_steps = self._max_start_time_steps(lengths)
+        sample_spans = max_start_time_steps + 1
+        sampled = (sample_uniform(0.0, 1.0, (len(env_ids),), device=self.device) * sample_spans.float()).long()
+        self.time_steps[env_ids] = torch.minimum(sampled, max_start_time_steps)
 
     def _adaptive_sampling(self, env_ids: Sequence[int]):
         episode_failed = self._env.termination_manager.terminated[env_ids]
@@ -835,9 +837,9 @@ class MotionCommand(CommandTerm):
         sampled = (
             (sampled_bins + sample_uniform(0.0, 1.0, (len(env_ids),), device=self.device))
             / self.bin_count
-            * trajectory_lengths.float()
+            * (self._max_start_time_steps(trajectory_lengths) + 1).float()
         ).long()
-        self.time_steps[env_ids] = torch.minimum(sampled, torch.clamp(trajectory_lengths - 1, min=0))
+        self.time_steps[env_ids] = torch.minimum(sampled, self._max_start_time_steps(trajectory_lengths))
 
         # Metrics
         H = -(sampling_probabilities * (sampling_probabilities + 1e-12).log()).sum()
@@ -849,6 +851,10 @@ class MotionCommand(CommandTerm):
         self.metrics["sampling_entropy"][:] = H_norm
         self.metrics["sampling_top1_prob"][:] = pmax
         self.metrics["sampling_top1_bin"][:] = imax.float() / self.bin_count
+
+    def _max_start_time_steps(self, trajectory_lengths: torch.Tensor) -> torch.Tensor:
+        required_future_steps = max(int(self.cfg.required_future_steps), 0)
+        return torch.clamp(trajectory_lengths - 1 - required_future_steps, min=0)
 
     def _resample_command(self, env_ids: Sequence[int]):
         if len(env_ids) == 0:
@@ -893,7 +899,8 @@ class MotionCommand(CommandTerm):
     def _update_command(self):
         self.time_steps += 1
         trajectory_lengths = self.motion.trajectory_time_step_total[self.trajectory_ids]
-        env_ids = torch.where(self.time_steps >= trajectory_lengths)[0]
+        required_future_steps = max(int(self.cfg.required_future_steps), 0)
+        env_ids = torch.where(self.time_steps + required_future_steps >= trajectory_lengths)[0]
         self._resample_command(env_ids)
 
         anchor_pos_w_repeat = self.anchor_pos_w[:, None, :].repeat(1, len(self.cfg.body_names), 1)
@@ -997,6 +1004,7 @@ class MotionCommandCfg(CommandTermCfg):
     sample_trajectories: bool = False
     equal_trajectory_sampling: bool = True
     sample_time_steps: bool = True
+    required_future_steps: int = 0
 
     adaptive_kernel_size: int = 1
     adaptive_lambda: float = 0.8

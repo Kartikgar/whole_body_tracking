@@ -71,11 +71,11 @@ class TrajectoryRecorder:
         }
         self.recorder.capture_initial_if_new_traj(state_tensors)
 
-    def finalize_rollout(self) -> int:
+    def finalize_rollout(self, valid_lengths: np.ndarray | None = None) -> int:
         """Finalize all open per-environment trajectories for the current rollout."""
 
         previous_count = self.recorder.collected_count
-        self.recorder.finalize_open()
+        self.recorder.finalize_open(valid_lengths=valid_lengths)
         return self.recorder.collected_count - previous_count
 
     def has_reached_target(self) -> bool:
