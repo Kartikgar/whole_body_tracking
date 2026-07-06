@@ -17,6 +17,17 @@ INSTALL_REQUIRES = [
     "wandb>=0.19",
 ]
 
+EXTRAS_REQUIRE = {
+    "mujoco_sim2sim": [
+        "mujoco",
+        "onnx",
+        "onnxruntime",
+        "numpy",
+        "imageio[ffmpeg]",
+        "tqdm",
+    ],
+}
+
 # Installation operation
 setup(
     name="whole_body_tracking",
@@ -28,6 +39,7 @@ setup(
     description=EXTENSION_TOML_DATA["package"]["description"],
     keywords=EXTENSION_TOML_DATA["package"]["keywords"],
     install_requires=INSTALL_REQUIRES,
+    extras_require=EXTRAS_REQUIRE,
     license="MIT",
     include_package_data=True,
     python_requires=">=3.10",
