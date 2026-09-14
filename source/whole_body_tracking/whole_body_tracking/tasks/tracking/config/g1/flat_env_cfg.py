@@ -235,8 +235,10 @@ class G1FlatDeltaAOpenLoopEnvCfg(G1FlatEnvCfg):
             "right_wrist_yaw_link",
         ]
         # Use global body pose rewards instead of relative-body pose rewards.
-        self.rewards.motion_body_pos_global = None
-        self.rewards.motion_body_ori_global = None
+        self.rewards.motion_body_pos = None
+        self.rewards.motion_body_ori = None
+        self.rewards.joint_limit = None
+        self.rewards.undesired_contacts = None
         # Delta open-loop applies motion_action[t] + delta[t], then should match the next reference frame.
         self.rewards.motion_global_anchor_pos = RewTerm(
             func=mdp.motion_global_anchor_position_error_exp_at_offset,
@@ -248,13 +250,23 @@ class G1FlatDeltaAOpenLoopEnvCfg(G1FlatEnvCfg):
             weight=0.5,
             params={"command_name": "motion", "std": 0.4, "time_offset": 1},
         )
-        self.rewards.motion_body_pos = RewTerm(
-            func=mdp.motion_relative_body_position_error_exp_at_offset,
+        # self.rewards.motion_body_pos = RewTerm(
+        #     func=mdp.motion_relative_body_position_error_exp_at_offset,
+        #     weight=1.0,
+        #     params={"command_name": "motion", "std": 0.3, "time_offset": 1},
+        # )
+        # self.rewards.motion_body_ori = RewTerm(
+        #     func=mdp.motion_relative_body_orientation_error_exp_at_offset,
+        #     weight=1.0,
+        #     params={"command_name": "motion", "std": 0.4, "time_offset": 1},
+        # )
+        self.rewards.motion_body_pos_global = RewTerm(
+            func=mdp.motion_global_body_position_error_exp_at_offset,
             weight=1.0,
             params={"command_name": "motion", "std": 0.3, "time_offset": 1},
         )
-        self.rewards.motion_body_ori = RewTerm(
-            func=mdp.motion_relative_body_orientation_error_exp_at_offset,
+        self.rewards.motion_body_ori_global = RewTerm(
+            func=mdp.motion_global_body_orientation_error_exp_at_offset,
             weight=1.0,
             params={"command_name": "motion", "std": 0.4, "time_offset": 1},
         )
@@ -272,7 +284,16 @@ class G1FlatDeltaAOpenLoopEnvCfg(G1FlatEnvCfg):
         # self.terminations.ee_body_pos = None
         self.terminations.anchor_pos = None
         self.terminations.anchor_ori=None
-        self.episode_length_s = 10.0
+
+        # Disable all domain randomization
+        self.events.physics_material = None
+        self.events.add_joint_default_pos = None
+        self.events.base_com = None
+        self.events.push_robot = None
+        self.observations.policy.enable_corruption = False
+        self.observations.critic.enable_corruption = False
+
+        self.episode_length_s = 1.0
 
 
 @configclass
@@ -294,9 +315,37 @@ class G1FlatDeltaAFineTuneEnvCfg(G1FlatEnvCfg):
         self.rewards.penalty_minimal_action_norm = None
         self.rewards.motion_body_pos_global = None
         self.rewards.motion_body_ori_global = None
-        self.episode_length_s = 10.0 #1.0
-        self.terminations.ee_body_pos = None
-        self.terminations.anchor_pos = None
+
+        # Disable all motion start-up jitter
+        self.commands.motion.pose_range = {
+            "x": (0.0, 0.0),
+            "y": (0.0, 0.0),
+            "z": (0.0, 0.0),
+            "roll": (0.0, 0.0),
+            "pitch": (0.0, 0.0),
+            "yaw": (0.0, 0.0),
+        }
+        self.commands.motion.velocity_range = {
+            "x": (0.0, 0.0),
+            "y": (0.0, 0.0),
+            "z": (0.0, 0.0),
+            "roll": (0.0, 0.0),
+            "pitch": (0.0, 0.0),
+            "yaw": (0.0, 0.0),
+        }
+        self.commands.motion.joint_position_range = (0.0, 0.0)
+
+        # Disable all event-based domain randomization
+        self.events.physics_material = None
+        self.events.add_joint_default_pos = None
+        self.events.base_com = None
+        self.events.push_robot = None
+        self.observations.policy.enable_corruption = False
+        self.observations.critic.enable_corruption = False
+
+        self.episode_length_s = 1.0
+        # self.terminations.ee_body_pos = None
+        # self.terminations.anchor_pos = None
 
 
 @configclass

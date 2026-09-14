@@ -1,7 +1,7 @@
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 
-NEXT_LAB_DATE = "2026.07.08"
+NEXT_LAB_DATE = "2026.09.16"
 
 @configclass
 class G1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
@@ -53,7 +53,7 @@ class G1FlatLowFreqPPORunnerCfg(G1FlatPPORunnerCfg):
 class G1FlatDeltaAFineTunePPORunnerCfg(G1FlatPPORunnerCfg):
     experiment_name = f"{NEXT_LAB_DATE}/g1_finetuned_policies"
     max_iterations = 1000
-    save_interval = 100
+    save_interval = 10
 
     # Frozen open-loop delta policy checkpoints used to inject delta actions during rollout.
     delta_policy_checkpoints: list[str] | None = None

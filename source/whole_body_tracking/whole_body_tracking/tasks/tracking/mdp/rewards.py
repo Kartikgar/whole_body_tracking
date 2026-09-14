@@ -171,6 +171,31 @@ def motion_global_anchor_orientation_error_exp_at_offset(
     error = quat_error_magnitude(anchor_quat_w, command.robot_anchor_quat_w) ** 2
     return torch.exp(-error / std**2)
 
+def motion_global_body_position_error_exp_at_offset(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    std: float,
+    time_offset: int,
+    body_names: list[str] | None = None,
+) -> torch.Tensor:
+    command = _get_motion_command(env, command_name)
+    body_indexes = _get_body_indexes(command, body_names)
+    body_pos_w = _motion_body_pos_w_at_offset(command, time_offset)
+    error = torch.sum(torch.square(body_pos_w[:, body_indexes] - command.robot_body_pos_w[:, body_indexes]), dim=-1)
+    return torch.exp(-error.mean(-1) / std**2)
+
+def motion_global_body_orientation_error_exp_at_offset(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    std: float,
+    time_offset: int,
+    body_names: list[str] | None = None,
+) -> torch.Tensor:
+    command = _get_motion_command(env, command_name)
+    body_indexes = _get_body_indexes(command, body_names)
+    body_quat_w = _motion_body_quat_w_at_offset(command, time_offset)
+    error = quat_error_magnitude(body_quat_w[:, body_indexes], command.robot_body_quat_w[:, body_indexes]) ** 2
+    return torch.exp(-error.mean(-1) / std**2)
 
 def motion_relative_body_position_error_exp_at_offset(
     env: ManagerBasedRLEnv,
