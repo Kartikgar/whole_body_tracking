@@ -121,7 +121,7 @@ class GenesisSceneAdapter:
             show_viewer=self.viewer,
             renderer=gs.renderers.Rasterizer(),
         )
-        self.scene.add_entity(gs.morphs.Plane())
+        self.ground = self.scene.add_entity(gs.morphs.Plane())
         self.robot = add_robot_entity(gs, self.scene, urdf_file=urdf_file, xml_file=xml_file)
 
         self.reference_markers: list[Any] = []
@@ -137,7 +137,7 @@ class GenesisSceneAdapter:
         if self.record_video:
             self.camera = self.scene.add_camera(
                 res=(1280, 720),
-                pos=(3.0, 0.0, 2.0),
+                pos=(0.0, 3.0, 2.0),
                 lookat=(0.0, 0.0, 0.8),
                 fov=45,
                 GUI=False,
@@ -223,8 +223,8 @@ class GenesisSceneAdapter:
             return
 
         self.camera.set_pose(
-            pos=(float(root_position[0] + 2.5), float(root_position[1]), 1.6),
-            lookat=(float(root_position[0]), float(root_position[1]), float(root_position[2] + 0.3)),
+            pos=(float(root_position[0]), float(root_position[1] + 2.5), 1.6),
+            lookat=(float(root_position[0]), float(root_position[1]), float(root_position[2] + 0.2)),
         )
         self.camera.render()
 
