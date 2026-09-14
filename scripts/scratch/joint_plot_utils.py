@@ -44,6 +44,18 @@ def infer_onnx_path_from_npz(npz_path: Path) -> Path | None:
     return None
 
 
+def load_default_joint_pos_from_npz(npz_path: Path) -> np.ndarray | None:
+    """Return ``default_joint_pos`` from a rollout NPZ when the key is present."""
+
+    with np.load(npz_path) as data:
+        if "default_joint_pos" not in data.files:
+            return None
+        values = np.asarray(data["default_joint_pos"], dtype=np.float32).reshape(-1)
+    if values.size == 0:
+        return None
+    return values
+
+
 def resolve_default_joint_pos(npz_path: Path, onnx_path: Path | None) -> tuple[np.ndarray, Path]:
     if onnx_path is not None:
         resolved = onnx_path.expanduser().resolve()
@@ -51,11 +63,15 @@ def resolve_default_joint_pos(npz_path: Path, onnx_path: Path | None) -> tuple[n
             raise FileNotFoundError(f"ONNX file not found: {resolved}")
         return load_default_joint_pos_from_onnx(resolved), resolved
 
+    npz_defaults = load_default_joint_pos_from_npz(npz_path)
+    if npz_defaults is not None:
+        return npz_defaults, npz_path
+
     inferred = infer_onnx_path_from_npz(npz_path)
     if inferred is None:
         raise FileNotFoundError(
             f"Could not infer exported ONNX path from {npz_path.name}. "
-            "Pass --default-joint-pos-onnx explicitly."
+            "Pass --default-joint-pos-onnx explicitly, or store default_joint_pos in the NPZ."
         )
     return load_default_joint_pos_from_onnx(inferred), inferred
 

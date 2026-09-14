@@ -4,8 +4,9 @@ Expects NPZ output from ``play.py --record_delta_model_dataset`` on
 ``Tracking-Flat-G1-DeltaA-OpenLoop-v0``.
 
 Figure 1 (actions): ``actions`` vs ``obs_motion_joint_action`` vs ``motion_joint_action``.
-Figure 2 (joints): ``obs_joint_pos`` vs ``motion_joint_pos`` (reference converted to
-policy-relative coordinates via ONNX ``default_joint_pos``).
+Figure 2 (joints): ``obs_joint_pos`` (source Isaac) vs ``motion_joint_pos``
+(target/reference, converted to policy-relative coords via ONNX ``default_joint_pos``).
+Figure 3 (bodies): ``body_pos_w`` (source Isaac) vs ``motion_body_pos_w`` (target).
 
 .. code-block:: bash
 
@@ -39,6 +40,42 @@ MEAN_LW = 2.0
 
 DEFAULT_ACTION_KEYS = ("actions", "motion_joint_action")
 DEFAULT_JOINT_KEYS = ("obs_joint_pos", "motion_joint_pos")
+DEFAULT_BODY_KEYS = ("body_pos_w", "motion_body_pos_w")
+XYZ = ("x", "y", "z")
+
+# Motion-command body order from G1FlatDeltaAOpenLoopEnvCfg.
+OPENLOOP_BODY_NAMES = [
+    "pelvis",
+    "left_hip_pitch_link",
+    "left_hip_roll_link",
+    "left_hip_yaw_link",
+    "left_knee_link",
+    "left_ankle_pitch_link",
+    "left_ankle_roll_link",
+    "right_hip_pitch_link",
+    "right_hip_roll_link",
+    "right_hip_yaw_link",
+    "right_knee_link",
+    "right_ankle_pitch_link",
+    "right_ankle_roll_link",
+    "waist_yaw_link",
+    "waist_roll_link",
+    "torso_link",
+    "left_shoulder_pitch_link",
+    "left_shoulder_roll_link",
+    "left_shoulder_yaw_link",
+    "left_elbow_link",
+    "left_wrist_roll_link",
+    "left_wrist_pitch_link",
+    "left_wrist_yaw_link",
+    "right_shoulder_pitch_link",
+    "right_shoulder_roll_link",
+    "right_shoulder_yaw_link",
+    "right_elbow_link",
+    "right_wrist_roll_link",
+    "right_wrist_pitch_link",
+    "right_wrist_yaw_link",
+]
 
 ACTION_SERIES = {
     "actions": ("#2563eb", "Delta Action (policy output)"),
@@ -47,8 +84,13 @@ ACTION_SERIES = {
 }
 
 JOINT_SERIES = {
-    "obs_joint_pos": ("#7c3aed", "Observed Joint Pos (robot relative)"),
-    "motion_joint_pos": ("#0d9488", "Target Joint Pos (reference relative)"),
+    "obs_joint_pos": ("#7c3aed", "Source env (Isaac robot, relative)"),
+    "motion_joint_pos": ("#0d9488", "Target env (Genesis motion, relative)"),
+}
+
+BODY_SERIES = {
+    "body_pos_w": ("#7c3aed", "Source env (Isaac body pos)"),
+    "motion_body_pos_w": ("#0d9488", "Target env (Genesis body pos)"),
 }
 
 
@@ -85,6 +127,8 @@ def _load_3d_array(
             raise KeyError(f"Key {key!r} not found in {npz_path}. Available keys: {sorted(data.files)}")
         array = np.asarray(data[key], dtype=np.float32)
 
+    if array.ndim == 4:
+        array = array.reshape(array.shape[0], array.shape[1], -1)
     if array.ndim != 3:
         raise ValueError(f"Expected 3D array [num_traj, T, D] for key {key!r}; got {array.shape}.")
     num_traj, total_steps, _ = array.shape
@@ -94,6 +138,18 @@ def _load_3d_array(
     valid_lengths = _infer_valid_lengths(array)
     valid_lengths = np.clip(valid_lengths - step_start, 0, end - step_start)
     return array[:, step_start:end, :], num_traj, valid_lengths
+
+
+def _body_dim_labels(num_dims: int) -> list[str]:
+    labels: list[str] = []
+    for body_name in OPENLOOP_BODY_NAMES:
+        for axis in XYZ:
+            labels.append(f"{body_name} {axis}")
+        if len(labels) >= num_dims:
+            break
+    if len(labels) < num_dims:
+        labels.extend(f"dof {idx}" for idx in range(len(labels), num_dims))
+    return labels[:num_dims]
 
 
 def _infer_valid_lengths(data: np.ndarray, *, atol: float = 1.0e-8, rtol: float = 1.0e-8) -> np.ndarray:
@@ -166,6 +222,7 @@ def plot_multi_series_aggregate(
     ncols: int = 6,
     dpi: int = 150,
     share_y: bool = False,
+    dim_labels: list[str] | None = None,
 ) -> Path:
     if len(series_specs) == 0:
         raise ValueError("series_specs must not be empty.")
@@ -205,7 +262,8 @@ def plot_multi_series_aggregate(
                 linewidth=0,
             )
             ax.plot(steps, mean[:, dim], color=spec.color, linewidth=MEAN_LW)
-        ax.set_title(f"dof {dim}", fontsize=9, pad=2)
+        title = dim_labels[dim] if dim_labels is not None and dim < len(dim_labels) else f"dof {dim}"
+        ax.set_title(title, fontsize=8, pad=2)
         ax.grid(True, color="#e8e8e8", linewidth=0.6)
         ax.tick_params(labelsize=7)
         if ylim is not None:
@@ -258,6 +316,10 @@ def _default_joint_pos_output(npz_path: Path) -> Path:
     return npz_path.with_name(f"{npz_path.stem}_openloop_joint_pos_compare_all_dims.png")
 
 
+def _default_body_pos_output(npz_path: Path) -> Path:
+    return npz_path.with_name(f"{npz_path.stem}_openloop_body_pos_w_compare.png")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Plot open-loop delta rollout action/joint comparisons from NPZ logs."
@@ -287,6 +349,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Output PNG for joint comparison. Default: <npz_stem>_openloop_joint_pos_compare_all_dims.png",
     )
     parser.add_argument(
+        "--body-pos-output",
+        type=Path,
+        default=None,
+        help="Output PNG for body-position comparison. Default: <npz_stem>_openloop_body_pos_w_compare.png",
+    )
+    parser.add_argument(
         "--default-joint-pos-onnx",
         type=Path,
         default=None,
@@ -304,6 +372,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--skip-joint-pos",
         action="store_true",
         help="Skip the obs_joint_pos / motion_joint_pos comparison figure.",
+    )
+    parser.add_argument(
+        "--skip-body-pos",
+        action="store_true",
+        help="Skip the body_pos_w / motion_body_pos_w comparison figure.",
     )
     return parser
 
@@ -378,7 +451,7 @@ def main(argv: list[str] | None = None) -> int:
                 step_start=step_start,
                 num_traj=num_traj,
                 ylabel=JOINT_POS_REL_YLABEL,
-                title_prefix="Open-loop obs_joint_pos vs motion_joint_pos",
+                title_prefix="Source vs target env joint positions",
                 ncols=args.ncols,
                 dpi=args.dpi,
                 share_y=args.share_y,
@@ -388,6 +461,33 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"[INFO] motion_joint_pos converted with default_joint_pos from {default_source.name}")
         print(f"[INFO] Saved joint-position comparison: {saved}")
+
+    if not args.skip_body_pos:
+        try:
+            body_specs, num_traj = _load_series_specs(
+                npz_path=npz_path,
+                keys=DEFAULT_BODY_KEYS,
+                palette=BODY_SERIES,
+                step_start=step_start,
+                step_end=step_end,
+            )
+            body_output = (args.body_pos_output or _default_body_pos_output(npz_path)).expanduser().resolve()
+            saved = plot_multi_series_aggregate(
+                body_specs,
+                output_path=body_output,
+                step_start=step_start,
+                num_traj=num_traj,
+                ylabel="Body position in world frame (m)",
+                title_prefix="Source vs target env body positions",
+                ncols=args.ncols,
+                dpi=args.dpi,
+                share_y=args.share_y,
+                dim_labels=_body_dim_labels(body_specs[0].data.shape[-1]),
+            )
+        except (KeyError, ValueError) as exc:
+            print(f"[ERROR] Body-position plot failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"[INFO] Saved body-position comparison: {saved}")
 
     return 0
 
