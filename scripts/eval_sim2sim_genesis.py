@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 from sim2sim_genesis.config import EvalConfig, OutputTargets, default_eval_artifact_path
+from sim2sim_genesis.experiment import apply_experiment, load_experiment
 from sim2sim_genesis.constants import (
     DEFAULT_G1_URDF,
     DEFAULT_REFERENCE_MARKER_RADIUS,
@@ -75,6 +76,7 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description="Modular Genesis sim2sim evaluator for whole_body_tracking ONNX policies.")
     parser.add_argument("--policy_path", type=str, required=True, help="Path to exported ONNX policy.")
+    parser.add_argument("--experiment_config", type=str, help="YAML file with direct physical-property overrides.")
     parser.add_argument("--dataset_yaml", type=str, default=None, help="Deprecated and ignored.")
     parser.add_argument(
         "--urdf_file",
@@ -247,6 +249,7 @@ def build_eval_config(args: argparse.Namespace, outputs: OutputTargets) -> EvalC
         output_motion_npz=outputs.output_motion_npz,
         video_name=args.video_name,
         seed=args.seed,
+        experiment=load_experiment(args.experiment_config),
     )
 
 
@@ -302,6 +305,9 @@ def build_runner(config: EvalConfig) -> Sim2SimRunner:
         enabled=config.domain_randomization,
     )
     domain_randomizer.setup()
+    if config.experiment is not None:
+        apply_experiment(scene, config.experiment)
+        print(f"[INFO] Genesis experiment overrides: {json.dumps(config.experiment.to_dict(), sort_keys=True)}")
     trajectory_recorder = None
     if config.record_motion:
         recorder_metadata: dict[str, object] = {
@@ -322,6 +328,7 @@ def build_runner(config: EvalConfig) -> Sim2SimRunner:
             "randomize_startup_qpos": np.array([int(config.randomize_startup_qpos)], dtype=np.int8),
             "startup_qpos_joint_range": np.asarray(config.startup_qpos_joint_range, dtype=np.float32),
             "seed": np.array([-1 if config.seed is None else int(config.seed)], dtype=np.int32),
+            "experiment_config_json": json.dumps(config.experiment.to_dict() if config.experiment else {}, sort_keys=True),
         }
         trajectory_recorder = TrajectoryRecorder(
             num_envs=config.num_envs,
@@ -355,6 +362,7 @@ def main() -> None:
     config = build_eval_config(args, outputs)
     runner = build_runner(config)
     result = runner.evaluate(run_timestamp)
+    result["experiment_config_json"] = json.dumps(config.experiment.to_dict() if config.experiment else {}, sort_keys=True)
 
     if outputs.output_csv is not None:
         write_csv(outputs.output_csv, result)

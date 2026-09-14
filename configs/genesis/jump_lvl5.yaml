@@ -1,0 +1,14 @@
+# All fields are optional. Values replace existing properties, not multipliers.
+link_masses_kg:
+  torso_link: 12.3  # Nominal mass: 6.78 kg in unitree_description/urdf/g1/main.urdf.
+
+# Passive spring stiffness (N m/rad for revolute joints), not controller Kp.
+# joint_stiffness:
+#  left_knee_joint: 5.0
+
+# Ground geometry coefficient; Genesis combines it with robot friction.
+# ground_friction: 0.1
+
+# All robot collision geometries; nominal G1 coefficient is 1.0.
+# Set both coefficients to 0.01 for low-friction contact.
+# robot_friction: 0.1

@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 
 from sim2sim_genesis.constants import DEFAULT_NEXT_LAB_DATE
+from sim2sim_genesis.experiment import ExperimentConfig
 
 
 @dataclass(slots=True)
@@ -39,6 +40,7 @@ class EvalConfig:
     output_motion_npz: str | None
     video_name: str | None
     seed: int | None
+    experiment: ExperimentConfig | None = None
 
 
 @dataclass(slots=True)
