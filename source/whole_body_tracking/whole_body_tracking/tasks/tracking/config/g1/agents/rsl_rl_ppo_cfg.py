@@ -64,3 +64,13 @@ class G1FlatDeltaAFineTunePPORunnerCfg(G1FlatPPORunnerCfg):
     delta_policy_require: bool = True
     delta_policy_clip_actions: float | None = None
     delta_policy_uncertainty_gate_scale: float = 2.5
+
+
+@configclass
+class G1FlatDeltaWrenchPPORunnerCfg(G1FlatDeltaActPPORunnerCfg):
+    experiment_name = f"{NEXT_LAB_DATE}/g1_delta_wrench_policies"
+
+
+@configclass
+class G1FlatDeltaWrenchFineTunePPORunnerCfg(G1FlatDeltaAFineTunePPORunnerCfg):
+    experiment_name = f"{NEXT_LAB_DATE}/g1_wrench_finetuned_policies"

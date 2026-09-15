@@ -60,10 +60,52 @@ class MotionOnPolicyRunner(OnPolicyRunner):
         self.delta_policy_ensemble_size = 0
         self._reset_delta_ensemble_stats()
 
+        if self._wrench_metadata() is not None and self.delta_policy_clip_actions is not None:
+            raise ValueError("Pelvis wrench uses env.actions.joint_pos.action_clip; leave delta_policy_clip_actions unset")
         if self.delta_policy_checkpoints:
             self._load_delta_policies(self.delta_policy_checkpoints)
         elif self.delta_policy_require:
             raise ValueError("`delta_policy_require=True` but no `delta_policy_checkpoints` were provided.")
+
+    def _wrench_metadata(self):
+        try:
+            term = self.env.unwrapped.action_manager.get_term("joint_pos")
+        except (AttributeError, KeyError, ValueError):
+            return None
+        if not hasattr(term, "wrench_contract"):
+            return None
+        external = bool(term.deployment_export)
+        group = self.delta_policy_obs_group if external else "policy"
+        manager = self.env.unwrapped.observation_manager
+        obs_cfg = getattr(self.env.unwrapped.cfg.observations, group)
+        layout = []
+        for name, dim in zip(manager.active_terms[group], manager.group_obs_term_dim[group]):
+            cfg = getattr(obs_cfg, name)
+            layout.append(dict(name="current_action" if name == "motion_joint_action" else name,
+                               shape=list(dim), scale=cfg.scale,
+                               history_length=cfg.history_length))
+        return dict(contract=term.wrench_contract(), observation_layout=layout,
+                    role="finetune" if external else "open_loop")
+
+    def _validate_wrench_checkpoint(self, loaded, *, frozen=False):
+        expected = self._wrench_metadata()
+        stored = (loaded.get("infos") or {}).get("pelvis_wrench")
+        if expected is None:
+            if stored is not None:
+                raise ValueError("Wrench checkpoint requires a matching pelvis-wrench task")
+            return
+        # A nominal joint-policy checkpoint is valid for initializing fine-tuning.
+        if stored is None and expected["role"] == "finetune" and not frozen:
+            return
+        required_role = "open_loop" if frozen else expected["role"]
+        if stored is None or stored.get("role") != required_role:
+            raise ValueError(f"Expected {required_role} pelvis-wrench checkpoint metadata")
+        if stored.get("contract") != expected["contract"] or stored.get("observation_layout") != expected["observation_layout"]:
+            raise ValueError("Pelvis-wrench checkpoint scales, clipping, frame, body or observation layout mismatch")
+
+    def load(self, path: str, load_optimizer: bool = True):
+        self._validate_wrench_checkpoint(torch.load(path, map_location="cpu", weights_only=False))
+        return super().load(path, load_optimizer=load_optimizer)
 
     @staticmethod
     def _normalize_delta_policy_checkpoints(checkpoints) -> list[str]:
@@ -152,14 +194,17 @@ class MotionOnPolicyRunner(OnPolicyRunner):
                 delta_agent_cfg = yaml.safe_load(f)
 
             loaded_dict = torch.load(str(checkpoint_path), map_location=self.device, weights_only=False)
+            self._validate_wrench_checkpoint(loaded_dict, frozen=True)
             state_dict = loaded_dict["model_state_dict"]
 
             ckpt_action_dim = _infer_mlp_output_dim(state_dict, "actor")
+            if self._wrench_metadata() is not None and ckpt_action_dim != 6:
+                raise ValueError(f"Frozen pelvis-wrench policy must output 6 actions, got {ckpt_action_dim}")
             ckpt_actor_obs = _infer_mlp_input_dim(state_dict, "actor")
             num_actor_obs = obs_dict[expected_obs_group].shape[1]
             if ckpt_actor_obs is not None and num_actor_obs != ckpt_actor_obs:
                 matching_groups = [name for name, value in obs_dict.items() if value.shape[1] == ckpt_actor_obs]
-                if len(matching_groups) == 1 and member_idx == 0:
+                if len(matching_groups) == 1 and member_idx == 0 and self._wrench_metadata() is None:
                     expected_obs_group = matching_groups[0]
                     self.delta_policy_obs_group = expected_obs_group
                     num_actor_obs = ckpt_actor_obs
@@ -282,6 +327,9 @@ class MotionOnPolicyRunner(OnPolicyRunner):
         return delta_actions
 
     def _set_delta_action_buffer(self, delta_actions: torch.Tensor):
+        if self._wrench_metadata() is not None:
+            # Reset clears env buffers; preserve the original tensor for trajectory logging.
+            delta_actions = delta_actions.clone()
         setattr(
             self.env.unwrapped,
             self.delta_policy_action_buffer_name,
@@ -289,6 +337,8 @@ class MotionOnPolicyRunner(OnPolicyRunner):
         )
 
     def _set_delta_base_action_buffer(self, base_actions: torch.Tensor):
+        if self._wrench_metadata() is not None:
+            base_actions = base_actions.clone()
         setattr(
             self.env.unwrapped,
             self.delta_policy_base_action_buffer_name,
@@ -353,6 +403,12 @@ class MotionOnPolicyRunner(OnPolicyRunner):
     def log(self, locs: dict, width: int = 80, pad: int = 35):
         super().log(locs, width=width, pad=pad)
         self._log_com_force_metrics(locs["it"])
+        term = None
+        if self._wrench_metadata() is not None:
+            term = self.env.unwrapped.action_manager.get_term("joint_pos")
+        if self.writer is not None and term is not None:
+            for name, value in term.consume_applied_wrench_log_stats().items():
+                self.writer.add_scalar(f"DeltaWrench/{name}", value, locs["it"])
         self._log_delta_action_magnitude_metrics(locs["it"])
         if self.writer is not None and self.delta_policy_ensemble_size > 1:
             self.writer.add_scalar(
@@ -497,7 +553,13 @@ class MotionOnPolicyRunner(OnPolicyRunner):
 
     def save(self, path: str, infos=None):
         """Save the model and training information."""
+        metadata = self._wrench_metadata()
+        if metadata is not None:
+            infos = dict(infos or {})
+            infos["pelvis_wrench"] = metadata
         super().save(path, infos)
+        if metadata is not None and metadata["role"] == "open_loop":
+            return
         if self.logger_type in ["wandb"]:
             policy_path = path.split("model")[0]
             filename = policy_path.split("/")[-2] + ".onnx"

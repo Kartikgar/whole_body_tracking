@@ -58,3 +58,15 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1FlatLowFreqPPORunnerCfg",
     },
 )
+
+
+for task_suffix, env_class, runner_class in (
+    ("OpenLoop", flat_env_cfg.G1FlatDeltaWrenchOpenLoopEnvCfg, "G1FlatDeltaWrenchPPORunnerCfg"),
+    ("Finetune", flat_env_cfg.G1FlatDeltaWrenchFineTuneEnvCfg, "G1FlatDeltaWrenchFineTunePPORunnerCfg"),
+):
+    gym.register(
+        id=f"Tracking-Flat-G1-DeltaWrench-{task_suffix}-v0",
+        entry_point="isaaclab.envs:ManagerBasedRLEnv", disable_env_checker=True,
+        kwargs={"env_cfg_entry_point": env_class,
+                "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:{runner_class}"},
+    )

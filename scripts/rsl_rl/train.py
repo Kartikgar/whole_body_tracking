@@ -145,6 +145,11 @@ LOWER_BODY_DELTA_ACTION_JOINT_NAMES = [
 
 def _configure_delta_action_space(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg):
     """Apply CLI-selected delta-action space overrides when the env/action cfg supports them."""
+    if hasattr(getattr(env_cfg.actions, "joint_pos", None), "torque_scale"):
+        if args_cli.delta_action_space != "whole_body":
+            raise ValueError("Pelvis-wrench task selects its action representation; do not override --delta_action_space")
+        return
+
     joint_pos_cfg = getattr(getattr(env_cfg, "actions", None), "joint_pos", None)
     if joint_pos_cfg is None:
         if args_cli.delta_action_space != "whole_body":

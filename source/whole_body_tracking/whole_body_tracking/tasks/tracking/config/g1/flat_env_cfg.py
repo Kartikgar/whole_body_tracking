@@ -362,3 +362,23 @@ class G1FlatLowFreqEnvCfg(G1FlatEnvCfg):
         super().__post_init__()
         self.decimation = round(self.decimation / LOW_FREQ_SCALE)
         self.rewards.action_rate_l2.weight *= LOW_FREQ_SCALE
+
+
+@configclass
+class G1FlatDeltaWrenchOpenLoopEnvCfg(G1FlatDeltaAOpenLoopEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.actions.joint_pos = mdp.DeltaPelvisWrenchActionCfg(
+            asset_name="robot", joint_names=[".*"], use_default_offset=True, scale=G1_ACTION_SCALE)
+        self.rewards.penalty_minimal_action_norm = None
+        self.rewards.action_rate_l2 = None
+        self.episode_length_s = 1.0
+
+
+@configclass
+class G1FlatDeltaWrenchFineTuneEnvCfg(G1FlatDeltaAFineTuneEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.actions.joint_pos = mdp.ExternalDeltaPelvisWrenchActionCfg(
+            asset_name="robot", joint_names=[".*"], use_default_offset=True, scale=G1_ACTION_SCALE)
+        self.episode_length_s = 1.0

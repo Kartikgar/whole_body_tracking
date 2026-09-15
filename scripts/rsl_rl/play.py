@@ -3,6 +3,7 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import json
 import sys
 
 from isaaclab.app import AppLauncher
@@ -251,6 +252,11 @@ LOWER_BODY_DELTA_ACTION_JOINT_NAMES = [
 
 def _configure_delta_action_space(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg):
     """Apply CLI-selected delta-action space overrides when the env/action cfg supports them."""
+    if hasattr(getattr(env_cfg.actions, "joint_pos", None), "torque_scale"):
+        if args_cli.delta_action_space != "whole_body":
+            raise ValueError("Pelvis-wrench task selects its action representation; do not override --delta_action_space")
+        return
+
     joint_pos_cfg = getattr(getattr(env_cfg, "actions", None), "joint_pos", None)
     if joint_pos_cfg is None:
         if args_cli.delta_action_space != "whole_body":
@@ -840,6 +846,14 @@ def _get_scene_robot(env):
         return None
 
 
+def _get_pelvis_wrench_term(env):
+    try:
+        term = env.action_manager.get_term("joint_pos")
+    except (AttributeError, KeyError, ValueError):
+        return None
+    return term if hasattr(term, "wrench_contract") else None
+
+
 def _is_delta_open_loop_state_action_logging(env) -> bool:
     """True when joint_pos uses trainable delta+ motion composition (not external-delta finetune)."""
 
@@ -850,7 +864,7 @@ def _is_delta_open_loop_state_action_logging(env) -> bool:
         joint_pos_term = action_manager.get_term("joint_pos")
     except Exception:
         return False
-    return joint_pos_term.__class__.__name__ == "DeltaJointPositionAction"
+    return joint_pos_term.__class__.__name__ in ("DeltaJointPositionAction", "DeltaPelvisWrenchAction")
 
 
 def _resolve_motion_joint_action_for_logging(env) -> torch.Tensor | None:
@@ -915,7 +929,11 @@ def _resolve_state_action_metadata(
         except Exception:
             body_names = []
 
-    if has_delta_policy:
+    wrench_term = _get_pelvis_wrench_term(env)
+    wrench_metadata = wrench_term.wrench_contract() if wrench_term is not None else None
+    if wrench_metadata is not None:
+        action_mode = "base_joint_actions_with_pelvis_wrench" if has_delta_policy else "motion_joint_actions_with_pelvis_wrench"
+    elif has_delta_policy:
         action_mode = "base_plus_delta_states"
     elif log_motion_joint_action:
         action_mode = "motion_joint_action_states"
@@ -928,6 +946,7 @@ def _resolve_state_action_metadata(
         "action_scale": action_scale,
         "external_action_scale": np.array([external_action_scale], dtype=np.float32),
         "action_mode": action_mode,
+        "pelvis_wrench_contract": json.dumps(wrench_metadata) if wrench_metadata is not None else "",
     }
 
 
@@ -1217,7 +1236,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             fps=state_action_fps,
             target_trajectories=args_cli.state_action_target_trajectories,
             secondary_action_keys=("base_actions", "delta_actions")
-            if ppo_runner.delta_policy is not None
+            if ppo_runner.delta_policy is not None or (_get_pelvis_wrench_term(env.unwrapped) is not None)
             else (),
         )
         checkpoint_stem = os.path.splitext(os.path.basename(resume_path))[0]
@@ -1246,7 +1265,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[INFO]: Collecting state-action trajectories until exit into {state_action_output_path}")
 
     # Export ONNX only for motion-command tasks, since exporter metadata expects `commands.motion`.
-    if _has_motion_command(env_cfg):
+    if _has_motion_command(env_cfg) and getattr(_get_pelvis_wrench_term(env.unwrapped), "deployment_export", True):
         export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
         checkpoint_stem = os.path.splitext(os.path.basename(resume_path))[0]
         onnx_filename = f"{checkpoint_stem if checkpoint_stem else 'policy'}.onnx"
@@ -1266,7 +1285,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
         print(f"[INFO]: Exported ONNX policy to: {os.path.join(export_model_dir, onnx_filename)}")
     else:
-        print("[INFO]: Skipping ONNX export for tasks without a motion command.")
+        print("[INFO]: Skipping deployment ONNX export for this task.")
     obs_split_cache: dict[str, tuple[list[str], list[int], list[str]]] = {}
     shutdown_requested_by_target = False
     source_metrics_tracker = None
@@ -1439,12 +1458,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     )
                 auxiliary_actions = None
                 if state_action_recorder.secondary_action_keys:
-                    if delta_actions is None:
-                        delta_actions = torch.zeros_like(actions)
-                    auxiliary_actions = {
-                        "base_actions": actions,
-                        "delta_actions": delta_actions,
-                    }
+                    if (_get_pelvis_wrench_term(env.unwrapped) is not None):
+                        auxiliary_actions = {
+                            "base_actions": state_action_step_actions,
+                            "delta_actions": actions if delta_actions is None else delta_actions,
+                        }
+                    else:
+                        auxiliary_actions = {
+                            "base_actions": actions,
+                            "delta_actions": torch.zeros_like(actions) if delta_actions is None else delta_actions,
+                        }
                 state_action_recorder.append_step(
                     state_components,
                     state_action_step_actions,
