@@ -23,12 +23,24 @@ class DeltaPelvisWrenchAction(DeltaComForceAction):
         self._processed_actions = torch.zeros_like(self._raw_actions)
         self._wrench = torch.zeros(self.num_envs, 6, device=self.device)
         self._wrench_scale = torch.tensor([cfg.force_scale] * 3 + [cfg.torque_scale] * 3, device=self.device)
+        self._normalized_wrench = torch.zeros_like(self._wrench)
+        self._previous_normalized_wrench = torch.zeros_like(self._wrench)
         self._stats = torch.zeros(14, device=self.device)
         self._samples = 0
 
     @property
     def action_dim(self):
         return 6
+
+    @property
+    def normalized_wrench(self):
+        """Return the clipped wrench command before force/torque unit scaling."""
+        return self._normalized_wrench
+
+    @property
+    def previous_normalized_wrench(self):
+        """Return the normalized wrench command applied on the preceding control step."""
+        return self._previous_normalized_wrench
 
     def wrench_contract(self):
         return dict(version=1, body="pelvis", frame="body_local", point="com",
@@ -39,7 +51,9 @@ class DeltaPelvisWrenchAction(DeltaComForceAction):
     def _process_wrench(self, actions):
         if actions.shape != self._wrench.shape:
             raise ValueError(f"Expected wrench shape {tuple(self._wrench.shape)}, got {tuple(actions.shape)}")
-        self._wrench[:] = actions.clamp(-self.cfg.action_clip, self.cfg.action_clip) * self._wrench_scale
+        self._previous_normalized_wrench[:] = self._normalized_wrench
+        self._normalized_wrench[:] = actions.clamp(-self.cfg.action_clip, self.cfg.action_clip)
+        self._wrench[:] = self._normalized_wrench * self._wrench_scale
         self._stats[:6] += self._wrench.detach().sum(0)
         self._stats[6] += self._wrench[:, :3].detach().norm(dim=-1).sum()
         self._stats[7] += self._wrench[:, 3:].detach().norm(dim=-1).sum()
@@ -72,6 +86,8 @@ class DeltaPelvisWrenchAction(DeltaComForceAction):
         self._raw_actions[ids] = 0
         self._processed_actions[ids] = 0
         self._wrench[ids] = 0
+        self._normalized_wrench[ids] = 0
+        self._previous_normalized_wrench[ids] = 0
         self._asset.set_external_force_and_torque(
             forces=self._wrench[ids, None, :3], torques=self._wrench[ids, None, 3:],
             body_ids=self._force_body_ids, env_ids=env_ids)

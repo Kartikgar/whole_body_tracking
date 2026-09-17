@@ -372,6 +372,11 @@ class G1FlatDeltaWrenchOpenLoopEnvCfg(G1FlatDeltaAOpenLoopEnvCfg):
             asset_name="robot", joint_names=[".*"], use_default_offset=True, scale=G1_ACTION_SCALE)
         self.rewards.penalty_minimal_action_norm = None
         self.rewards.action_rate_l2 = None
+        self.rewards.pelvis_wrench_rate_l2 = RewTerm(
+            func=mdp.pelvis_wrench_rate_l2,
+            weight=-0.02,
+            params={"action_name": "joint_pos"},
+        )
         self.episode_length_s = 1.0
 
 

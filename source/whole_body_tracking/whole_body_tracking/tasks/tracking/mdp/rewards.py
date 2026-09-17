@@ -274,3 +274,21 @@ def feet_contact_time(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg, thresh
 def penalty_minimal_action_norm(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Delta-action regularizer: exp(-||a_delta||) - 1."""
     return torch.exp(-torch.norm(env.action_manager.action, dim=-1)) - 1.0
+
+
+def pelvis_wrench_rate_l2(env: ManagerBasedRLEnv, action_name: str = "joint_pos") -> torch.Tensor:
+    """Penalize changes in the clipped, scale-normalized pelvis wrench command.
+
+    The squared vector difference penalizes magnitude and direction changes in one
+    term. Force and torque are normalized by their configured scales inside the
+    action term, so neither physical unit dominates the penalty.
+    """
+
+    action_term = env.action_manager.get_term(action_name)
+    current = getattr(action_term, "normalized_wrench", None)
+    previous = getattr(action_term, "previous_normalized_wrench", None)
+    if current is None or previous is None:
+        raise RuntimeError(
+            f"Action term '{action_name}' does not expose normalized pelvis-wrench history."
+        )
+    return torch.sum(torch.square(current - previous), dim=-1)

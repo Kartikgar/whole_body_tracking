@@ -49,6 +49,8 @@ class WrenchTests(unittest.TestCase):
         term = self.make()
         a = torch.tensor([[2., -.5, 0., -2., .5, 0.]]).repeat(2, 1)
         term.process_actions(a)
+        torch.testing.assert_close(term.normalized_wrench[0], torch.tensor([1., -.5, 0., -1., .5, 0.]))
+        self.assertEqual(term.previous_normalized_wrench.count_nonzero(), 0)
         torch.testing.assert_close(term._wrench[0], torch.tensor([300., -150., 0., -60., 30., 0.]))
         torch.testing.assert_close(term._raw_actions, a)
         torch.testing.assert_close(term._joint_position_targets, torch.full((2, 29), 1.5))
@@ -62,6 +64,19 @@ class WrenchTests(unittest.TestCase):
         self.assertEqual(stats['saturation_Fy'], 0.)
         self.assertEqual(stats['saturation_Tx'], 1.)
         self.assertEqual(term.consume_applied_wrench_log_stats(), {})
+
+    def test_normalized_wrench_history_tracks_magnitude_and_direction_changes(self):
+        term = self.make()
+        first = torch.tensor([[1., 0., 0., 0., 0., 0.], [.5, 0., 0., 0., 0., 0.]])
+        second = torch.tensor([[0., 1., 0., 0., 0., 0.], [1., 0., 0., 0., 0., 0.]])
+        term.process_actions(first)
+        term.process_actions(second)
+        torch.testing.assert_close(term.previous_normalized_wrench, first)
+        torch.testing.assert_close(term.normalized_wrench, second)
+        # Direction change for env 0: ||[0, 1, 0] - [1, 0, 0]||^2 = 2.
+        # Magnitude change for env 1: ||[1, 0, 0] - [.5, 0, 0]||^2 = .25.
+        rate_l2 = torch.sum(torch.square(term.normalized_wrench - term.previous_normalized_wrench), dim=-1)
+        torch.testing.assert_close(rate_l2, torch.tensor([2., .25]))
 
     def test_zero_wrench_and_external_joint_targets(self):
         term = self.make(external=True)
@@ -80,6 +95,8 @@ class WrenchTests(unittest.TestCase):
         term.reset([0])
         self.assertEqual(term._wrench[0].count_nonzero(), 0)
         self.assertEqual(term._wrench[1].count_nonzero(), 6)
+        self.assertEqual(term._normalized_wrench[0].count_nonzero(), 0)
+        self.assertEqual(term._previous_normalized_wrench[0].count_nonzero(), 0)
         self.assertEqual(term._env.delta_external_actions[0].count_nonzero(), 0)
         self.assertEqual(term._env.delta_external_actions[1].count_nonzero(), 6)
         self.assertEqual(term._asset.set_external_force_and_torque.call_args.kwargs['env_ids'], [0])
