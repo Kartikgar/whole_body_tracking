@@ -51,6 +51,7 @@ class InputInfo:
     path: Path
     num_traj: int
     time_steps: int
+    is_stacked: bool
     valid_lengths: np.ndarray
     fps: float | None
     action_key: str | None
@@ -124,6 +125,7 @@ def _scan_input(path: Path) -> InputInfo:
         path=path,
         num_traj=num_traj,
         time_steps=time_steps,
+        is_stacked=len(joint_pos_shape) == 3,
         valid_lengths=_valid_lengths(path, num_traj, time_steps, files),
         fps=_fps(path, files),
         action_key=_action_key(files),
@@ -132,9 +134,20 @@ def _scan_input(path: Path) -> InputInfo:
 
 
 def _select_traj(arr: np.ndarray, input_info: InputInfo, traj_idx: int, valid_len: int) -> np.ndarray:
-    if input_info.num_traj == 1:
-        return np.asarray(arr[:valid_len], dtype=np.float32)
-    return np.asarray(arr[traj_idx, :valid_len], dtype=np.float32)
+    if input_info.is_stacked:
+        if arr.shape[0] != input_info.num_traj or arr.shape[1] != input_info.time_steps:
+            raise ValueError(
+                f"Stacked array shape {arr.shape} in '{input_info.path}' does not have expected "
+                f"leading shape ({input_info.num_traj}, {input_info.time_steps})."
+            )
+        return np.asarray(arr[traj_idx, :valid_len], dtype=np.float32)
+
+    if arr.shape[0] != input_info.time_steps:
+        raise ValueError(
+            f"Single-clip array shape {arr.shape} in '{input_info.path}' does not have expected "
+            f"time dimension {input_info.time_steps}."
+        )
+    return np.asarray(arr[:valid_len], dtype=np.float32)
 
 
 def _copy_time_series_key(
@@ -182,7 +195,7 @@ def _copy_initial_key(
                 return None
 
     first = _load_key(inputs[0].path, key)
-    first_item = np.asarray(first[0] if inputs[0].num_traj > 1 else first, dtype=np.float32)
+    first_item = np.asarray(first[0] if inputs[0].is_stacked else first, dtype=np.float32)
     out_shape = (total_traj, *first_item.shape)
     out = np.lib.format.open_memmap(out_dir / f"{key}.npy", mode="w+", dtype=np.float32, shape=out_shape)
 
@@ -190,7 +203,15 @@ def _copy_initial_key(
     for input_info in inputs:
         arr = _load_key(input_info.path, key)
         for traj_idx in range(input_info.num_traj):
-            item = np.asarray(arr[traj_idx] if input_info.num_traj > 1 else arr, dtype=np.float32)
+            if input_info.is_stacked:
+                if arr.shape[0] != input_info.num_traj:
+                    raise ValueError(
+                        f"`{key}` trajectory count mismatch in '{input_info.path}': "
+                        f"expected {input_info.num_traj}, got shape {arr.shape}."
+                    )
+                item = np.asarray(arr[traj_idx], dtype=np.float32)
+            else:
+                item = np.asarray(arr, dtype=np.float32)
             if item.shape != first_item.shape:
                 raise ValueError(
                     f"`{key}` feature shape mismatch in '{input_info.path}': "
