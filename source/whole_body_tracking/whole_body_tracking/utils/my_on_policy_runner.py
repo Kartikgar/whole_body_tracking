@@ -52,6 +52,18 @@ class MotionOnPolicyRunner(OnPolicyRunner):
         self.delta_policy_require = bool(self.cfg.get("delta_policy_require", False))
         self.delta_policy_clip_actions = self.cfg.get("delta_policy_clip_actions", self.env.clip_actions)
         self.delta_policy_uncertainty_gate_scale = float(self.cfg.get("delta_policy_uncertainty_gate_scale", 1.0))
+        self.delta_policy_injection_probability = float(
+            self.cfg.get("delta_policy_injection_probability", 1.0)
+        )
+        if not 0.0 <= self.delta_policy_injection_probability <= 1.0:
+            raise ValueError(
+                "delta_policy_injection_probability must be in [0, 1], got "
+                f"{self.delta_policy_injection_probability}."
+            )
+        self.delta_policy_injection_mask = torch.ones(
+            self.env.num_envs, 1, dtype=torch.float32, device=self.device
+        )
+        self._resample_delta_injection_mask()
 
         self.delta_policy = None
         self.delta_policies: list[ActorCritic | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent] = []
@@ -336,6 +348,37 @@ class MotionOnPolicyRunner(OnPolicyRunner):
             delta_actions.to(self.env.device),
         )
 
+    def _resample_delta_injection_mask(self, env_ids: torch.Tensor | None = None):
+        """Sample episode-level frozen-delta activation independently per environment."""
+
+        if env_ids is None:
+            env_ids = torch.arange(self.env.num_envs, device=self.device)
+        else:
+            env_ids = env_ids.to(device=self.device, dtype=torch.long).flatten()
+        if env_ids.numel() == 0:
+            return
+
+        if self.delta_policy_injection_probability <= 0.0:
+            self.delta_policy_injection_mask[env_ids] = 0.0
+        elif self.delta_policy_injection_probability >= 1.0:
+            self.delta_policy_injection_mask[env_ids] = 1.0
+        else:
+            samples = torch.rand(env_ids.numel(), 1, device=self.device)
+            self.delta_policy_injection_mask[env_ids] = (
+                samples < self.delta_policy_injection_probability
+            ).to(dtype=self.delta_policy_injection_mask.dtype)
+
+    def _apply_delta_injection_mask(self, delta_actions: torch.Tensor) -> torch.Tensor:
+        """Zero frozen-delta actions for environments assigned base-only episodes."""
+
+        if delta_actions.shape[0] != self.env.num_envs:
+            raise RuntimeError(
+                f"Delta action batch size {delta_actions.shape[0]} does not match num_envs={self.env.num_envs}."
+            )
+        return delta_actions * self.delta_policy_injection_mask.to(
+            device=delta_actions.device, dtype=delta_actions.dtype
+        )
+
     def _set_delta_base_action_buffer(self, base_actions: torch.Tensor):
         if self._wrench_metadata() is not None:
             base_actions = base_actions.clone()
@@ -418,6 +461,12 @@ class MotionOnPolicyRunner(OnPolicyRunner):
                 "DeltaEnsemble/gate_mean", float(self.delta_policy_last_gate.mean().item()), locs["it"]
             )
             self.writer.add_scalar("DeltaEnsemble/num_members", float(self.delta_policy_ensemble_size), locs["it"])
+        if self.writer is not None and self.delta_policy is not None:
+            self.writer.add_scalar(
+                "DeltaInjection/active_fraction",
+                float(self.delta_policy_injection_mask.mean().item()),
+                locs["it"],
+            )
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):  # noqa: C901
         if self.delta_policy is None:
@@ -482,10 +531,15 @@ class MotionOnPolicyRunner(OnPolicyRunner):
                     delta_actions = self._compute_delta_actions(delta_obs)
                     if delta_actions is None:
                         raise RuntimeError("Delta policy is required for this runner mode but is not initialized.")
+                    delta_actions = self._apply_delta_injection_mask(delta_actions)
                     self._set_delta_action_buffer(delta_actions)
 
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
                     obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
+                    done_env_ids = torch.nonzero(
+                        dones.reshape(dones.shape[0], -1).any(dim=1), as_tuple=False
+                    ).flatten()
+                    self._resample_delta_injection_mask(done_env_ids)
 
                     obs = self.obs_normalizer(obs)
                     if self.privileged_obs_type is not None:

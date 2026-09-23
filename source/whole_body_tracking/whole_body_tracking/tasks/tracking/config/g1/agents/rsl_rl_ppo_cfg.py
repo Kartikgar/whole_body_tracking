@@ -64,6 +64,9 @@ class G1FlatDeltaAFineTunePPORunnerCfg(G1FlatPPORunnerCfg):
     delta_policy_require: bool = True
     delta_policy_clip_actions: float | None = None
     delta_policy_uncertainty_gate_scale: float = 2.5
+    # Probability that a newly reset environment receives frozen-delta assistance
+    # for its complete episode. A value of 1.0 preserves the original behavior.
+    delta_policy_injection_probability: float = 1.0
 
 
 @configclass

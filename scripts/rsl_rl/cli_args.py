@@ -75,6 +75,15 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
             "If omitted, uses the runner default (env clip_actions when config is None)."
         ),
     )
+    arg_group.add_argument(
+        "--delta_policy_injection_probability",
+        type=float,
+        default=None,
+        help=(
+            "Probability that frozen delta assistance is enabled for each finetuning episode. "
+            "The mask is sampled independently per environment at episode reset."
+        ),
+    )
 
 
 def parse_rsl_rl_cfg(task_name: str, args_cli: argparse.Namespace) -> RslRlOnPolicyRunnerCfg:
@@ -132,6 +141,12 @@ def update_rsl_rl_cfg(agent_cfg: RslRlOnPolicyRunnerCfg, args_cli: argparse.Name
         and hasattr(agent_cfg, "delta_policy_clip_actions")
     ):
         agent_cfg.delta_policy_clip_actions = args_cli.delta_policy_clip_actions
+    if (
+        hasattr(args_cli, "delta_policy_injection_probability")
+        and args_cli.delta_policy_injection_probability is not None
+        and hasattr(agent_cfg, "delta_policy_injection_probability")
+    ):
+        agent_cfg.delta_policy_injection_probability = args_cli.delta_policy_injection_probability
     # set the project name for wandb and neptune
     if agent_cfg.logger in {"wandb", "neptune"} and args_cli.log_project_name:
         agent_cfg.wandb_project = args_cli.log_project_name

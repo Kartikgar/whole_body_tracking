@@ -1171,6 +1171,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
     if args_cli.replay_motion_actions_only:
         print("[INFO]: Replaying motion actions only (policy actions are forced to zero each step).")
+    if ppo_runner.delta_policy is not None:
+        print(
+            "[INFO]: Frozen-delta episode injection probability: "
+            f"{ppo_runner.delta_policy_injection_probability:.4f} "
+            f"(initial active fraction={ppo_runner.delta_policy_injection_mask.mean().item():.4f})."
+        )
 
     delta_dataset_recorder = None
     delta_dataset_output_path = None
@@ -1348,6 +1354,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 delta_obs = ppo_runner._compute_delta_policy_obs()
                 delta_actions = ppo_runner._compute_delta_actions(delta_obs)
                 if delta_actions is not None:
+                    delta_actions = ppo_runner._apply_delta_injection_mask(delta_actions)
                     ppo_runner._set_delta_action_buffer(delta_actions)
                     delta_log_obs = delta_obs
                     delta_log_obs_group = ppo_runner.delta_policy_obs_group
@@ -1399,6 +1406,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 state_action_step_actions = motion_joint_action
 
             obs, _, dones, _ = env.step(actions)
+            if ppo_runner.delta_policy is not None:
+                done_env_ids = torch.nonzero(
+                    dones.reshape(dones.shape[0], -1).any(dim=1), as_tuple=False
+                ).flatten()
+                ppo_runner._resample_delta_injection_mask(done_env_ids)
 
             done_source = dones
             if delta_dataset_recorder is not None or state_action_recorder is not None or source_metrics_tracker is not None:

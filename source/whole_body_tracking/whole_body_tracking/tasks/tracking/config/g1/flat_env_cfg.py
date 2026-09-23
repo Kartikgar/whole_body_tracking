@@ -316,32 +316,32 @@ class G1FlatDeltaAFineTuneEnvCfg(G1FlatEnvCfg):
         self.rewards.motion_body_pos_global = None
         self.rewards.motion_body_ori_global = None
 
-        # Disable all motion start-up jitter
-        self.commands.motion.pose_range = {
-            "x": (0.0, 0.0),
-            "y": (0.0, 0.0),
-            "z": (0.0, 0.0),
-            "roll": (0.0, 0.0),
-            "pitch": (0.0, 0.0),
-            "yaw": (0.0, 0.0),
-        }
-        self.commands.motion.velocity_range = {
-            "x": (0.0, 0.0),
-            "y": (0.0, 0.0),
-            "z": (0.0, 0.0),
-            "roll": (0.0, 0.0),
-            "pitch": (0.0, 0.0),
-            "yaw": (0.0, 0.0),
-        }
-        self.commands.motion.joint_position_range = (0.0, 0.0)
+        # Enable all motion start-up jitter
+        # self.commands.motion.pose_range = {
+        #     "x": (0.0, 0.0),
+        #     "y": (0.0, 0.0),
+        #     "z": (0.0, 0.0),
+        #     "roll": (0.0, 0.0),
+        #     "pitch": (0.0, 0.0),
+        #     "yaw": (0.0, 0.0),
+        # }
+        # self.commands.motion.velocity_range = {
+        #     "x": (0.0, 0.0),
+        #     "y": (0.0, 0.0),
+        #     "z": (0.0, 0.0),
+        #     "roll": (0.0, 0.0),
+        #     "pitch": (0.0, 0.0),
+        #     "yaw": (0.0, 0.0),
+        # }
+        # self.commands.motion.joint_position_range = (0.0, 0.0)
 
-        # Disable all event-based domain randomization
-        self.events.physics_material = None
-        self.events.add_joint_default_pos = None
-        self.events.base_com = None
-        self.events.push_robot = None
-        self.observations.policy.enable_corruption = False
-        self.observations.critic.enable_corruption = False
+        # Enable all event-based domain randomization
+        # self.events.physics_material = None
+        # self.events.add_joint_default_pos = None
+        # self.events.base_com = None
+        # self.events.push_robot = None
+        # self.observations.policy.enable_corruption = False
+        # self.observations.critic.enable_corruption = False
 
         self.episode_length_s = 1.0
         # self.terminations.ee_body_pos = None
