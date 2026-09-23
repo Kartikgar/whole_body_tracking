@@ -19,9 +19,9 @@ Use your Isaac Lab conda/env when launching scripts (see [README](../README.md))
 
 **Log layout:** checkpoints go under `logs/rsl_rl/<experiment_name>/<YYYY-MM-DD_HH-MM-SS>_<run_name>/model_*.pt`, with `params/agent.yaml` and `params/env.yaml` saved per run. Default experiment folders (from `rsl_rl_ppo_cfg.py`):
 
-- Base: `2026.06.10/g1_base_policies`
-- Delta open-loop: `2026.06.10/g1_delta_policies`
-- Finetune: `2026.06.10/g1_finetuned_policies`
+- Base: `2026.09.30/g1_base_policies`
+- Delta open-loop: `2026.09.30/g1_delta_policies`
+- Finetune: `2026.09.30/g1_finetuned_policies`
 
 ---
 
