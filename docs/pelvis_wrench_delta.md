@@ -5,9 +5,12 @@ in Genesis. The target mass override is an absolute mass: use nominal pelvis mas
 plus payload mass. Genesis's installed mass setter also scales inertia.
 
 The new tasks preserve the corresponding Delta-A tracking rewards, observations,
-terminations, and 1-second horizon. Open-loop action magnitude and smoothness
-penalties are disabled. Fine-tuning retains base joint-action regularization.
-Existing joint-delta and COM-force tasks are unchanged.
+terminations, and 1-second horizon. The legacy open-loop joint-action magnitude
+and action-rate penalties are disabled. The open-loop wrench task does apply a
+separate wrench-rate penalty (`pelvis_wrench_rate_l2`, default weight `-0.02`)
+to discourage step-to-step changes in the six-dimensional wrench. Fine-tuning
+retains base joint-action regularization. Existing joint-delta and COM-force
+tasks are unchanged.
 
 ## Representation
 
@@ -36,6 +39,23 @@ env.actions.joint_pos.action_clip=1.0
 Scales and clipping must be finite positive scalars. The task fixes the body to
 `pelvis`. No `--delta_action_space` option is needed; incompatible modes fail.
 Do not use the legacy COM-force clipping option for this representation.
+
+Override the smoothness weight at run time with a Hydra config override. A zero
+weight disables it; a larger negative magnitude penalizes wrench changes more
+strongly:
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-DeltaWrench-OpenLoop-v0 \
+  --motion_file /path/to/genesis_dataset.npz \
+  env.rewards.pelvis_wrench_rate_l2.weight=-0.05 \
+  --num_envs 4096 --max_iterations 2000 --headless
+```
+
+The corresponding reward term is logged with the other reward terms in
+TensorBoard. The term penalizes squared differences between consecutive wrench
+actions. By itself it encourages smooth changes in magnitude and direction; it
+does not separately constrain absolute wrench magnitude.
 
 ## Commands
 

@@ -1,4 +1,4 @@
-# Training and evaluation commands (G1 Delta-A pipeline)
+# Training and evaluation commands (G1 tracking and delta policies)
 
 Reference for training and evaluating the three policy stages in this repo:
 
@@ -74,6 +74,25 @@ python scripts/replay_npz.py --motion_file /path/to/motion.npz
 | Finetune | Standard motion NPZ (no motion `action` required in obs; base uses motion-tracking obs) |
 
 For training, provide motion via **`--motion_file`** (local) or **`--registry_name`** (WandB artifact containing `motion.npz`). Local path is preferred for delta work.
+
+### Merge motion NPZ files with different lengths
+
+`scripts/merge_motion_npz.py` combines single-clip or stacked NPZ files into a
+stacked motion file. It supports inputs with different time dimensions and
+respects an input `valid_lengths` array, copying only each trajectory's valid
+frames and padding the output by repeating its last valid frame. This is useful
+for combining Genesis datasets or bootstrapped motion sets:
+
+```bash
+python scripts/merge_motion_npz.py \
+  /path/to/walk.npz /path/to/jump_variants.npz /path/to/dance.npz \
+  --output /path/to/combined_motions.npz
+```
+
+The output includes `valid_lengths` for every trajectory; the shared time axis
+is padded to the longest valid trajectory. Inputs must have compatible motion
+fields and metadata (including joint/body names and action conventions when
+present).
 
 ---
 
@@ -174,6 +193,12 @@ python scripts/rsl_rl/play.py \
 - `play.py` runs `env.reset()` + motion bootstrap, disables adaptive reference sampling, and exports **base policy ONNX** to `<checkpoint_dir>/exported/<checkpoint_stem>.onnx`.
 - Add `--video` for viewport recording; `--disable_dr` to match no-DR training.
 
+For motion-command tasks, `play.py` also computes source-simulator tracking
+metrics automatically. At exit it writes a JSON summary under
+`<checkpoint_run>/source_metrics/`, alongside step-weighted and trajectory-level
+tracking statistics. This runs whether or not rollout datasets are being
+recorded.
+
 ### Record state–action rollouts (Isaac, for sim2sim comparison)
 
 ```bash
@@ -227,6 +252,26 @@ python scripts/rsl_rl/play.py \
 
 NPZ includes `initial_*`, `base_actions`, `delta_actions`, post-step source states (`joint_pos`, `body_pos_w`, …), and metadata (`joint_names`, `body_names`, `action_scale`, `action_mode=base_plus_delta_states`).
 
+To apply the frozen delta only on a fraction of finetuning episodes, set an
+episode-level injection probability. The mask is sampled independently for
+each environment on reset and remains fixed for that episode. The default is
+`1.0` (delta active every episode); `0.0` disables it:
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --resume True \
+  --checkpoint /abs/path/to/base/model_XXXX.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_YYYY.pt \
+  --motion_file /abs/path/to/motion.npz \
+  --delta_policy_injection_probability 0.5 \
+  --num_envs 4096 --headless
+```
+
+Use the same option with `play.py` to evaluate at a chosen probability. Training
+logs the realized `DeltaInjection/active_fraction`; playback prints the
+configured probability and initial active fraction.
+
 **2. Replay logged base actions open-loop in Genesis** (metadata from exported **base** ONNX):
 
 ```bash
@@ -249,6 +294,17 @@ python scripts/scratch/compare_transfer_trajectories.py \
 ```
 
 By default this writes two overlays: policy-relative `joint_pos` and world-frame `body_pos_w` (aligned by `body_names`). Use `--compare joints` or `--compare bodies` to plot one only.
+
+### Source-simulation tracking metrics and trajectory counts
+
+The source metrics JSON is written automatically by `play.py` for motion-command
+tasks, including delta finetuning playback. Its trajectory-level averages use
+every trajectory finalized by the metrics tracker, including partial active
+trajectories when playback exits. Dataset recorders have their own target count
+and can save a capped set of completed trajectories. Consequently, a metrics
+summary and a recorded NPZ can cover different trajectory counts; when comparing
+policies, inspect the JSON's trajectory count and the NPZ's trajectory count
+rather than assuming the recorder's requested `N` also caps source metrics.
 
 **Interpretation:** post–stage-2 success means frozen delta already makes Genesis(base) track Isaac(base+δ). Stage-3 base finetune is optional A/B with the **same frozen delta checkpoint**.
 
@@ -567,6 +623,7 @@ python scripts/rsl_rl/evaluate_sim2sim_genesis.py \
 | `--checkpoint` | both | Absolute path to `model_*.pt` |
 | `--wandb_path` | both | `entity/project/run` or `.../run/model_X.pt` |
 | `--delta_policy_checkpoints` | train, play | One or more frozen open-loop delta checkpoints for finetune/play |
+| `--delta_policy_injection_probability` | train, play | Per-episode probability of enabling frozen delta assistance during finetune (default `1.0`) |
 | `--delta_policy_uncertainty_gate_scale` | train, play | Ensemble gating scale when 2+ delta checkpoints are passed (default `1.0`; ignored for a single checkpoint) |
 | `--delta_action_space` | both | `whole_body` (default), `ankles`, `lower_body`, `com_force` |
 | `--record_delta_model_dataset` | play | NPZ delta obs/actions |
