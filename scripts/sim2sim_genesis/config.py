@@ -41,6 +41,9 @@ class EvalConfig:
     video_name: str | None
     seed: int | None
     experiment: ExperimentConfig | None = None
+    policy_type: str = "beyondmimic"
+    sonic_model_dir: str | None = None
+    trajectory_index: int = 0
 
 
 @dataclass(slots=True)

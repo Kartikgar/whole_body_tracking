@@ -8,10 +8,18 @@ import csv
 import json
 import os
 import random
+import sys
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import torch
+
+# Keep the simulator-independent project modules available in lightweight
+# Genesis environments where the Isaac Lab extension is not installed.
+PROJECT_SOURCE_DIR = Path(__file__).resolve().parents[1] / "source" / "whole_body_tracking"
+if str(PROJECT_SOURCE_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SOURCE_DIR))
 
 from sim2sim_genesis.config import EvalConfig, OutputTargets, default_eval_artifact_path
 from sim2sim_genesis.experiment import apply_experiment, load_experiment
@@ -75,13 +83,16 @@ def parse_args() -> argparse.Namespace:
     """Parse CLI arguments for the modular Genesis sim2sim evaluator."""
 
     parser = argparse.ArgumentParser(description="Modular Genesis sim2sim evaluator for whole_body_tracking ONNX policies.")
-    parser.add_argument("--policy_path", type=str, required=True, help="Path to exported ONNX policy.")
+    parser.add_argument("--policy_type", choices=("beyondmimic", "sonic"), default="beyondmimic")
+    parser.add_argument("--policy_path", type=str, help="BeyondMimic exported ONNX policy.")
+    parser.add_argument("--sonic_model_dir", type=str, help="Default SONIC ONNX pair, YAML, and downloaded G1 asset.")
+    parser.add_argument("--trajectory_index", type=int, default=0, help="SONIC trajectory in a stacked NPZ.")
     parser.add_argument("--experiment_config", type=str, help="YAML file with direct physical-property overrides.")
     parser.add_argument("--dataset_yaml", type=str, default=None, help="Deprecated and ignored.")
     parser.add_argument(
         "--urdf_file",
         type=str,
-        default=DEFAULT_G1_URDF,
+        default=None,
         help="Path to the robot URDF used by Genesis.",
     )
     parser.add_argument("--xml_file", type=str, default=None, help="Optional MJCF XML fallback.")
@@ -112,13 +123,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--add_noise",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Add training-style uniform noise to supported observation terms.",
     )
     parser.add_argument(
         "--domain_randomization",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Apply Isaac-matching domain randomization in Genesis.",
     )
     parser.add_argument(
@@ -156,6 +167,32 @@ def parse_args() -> argparse.Namespace:
 def validate_inputs(args: argparse.Namespace) -> None:
     """Validate required input paths before constructing the evaluator."""
 
+    if args.policy_type == "sonic":
+        if args.policy_path or not args.sonic_model_dir or not args.motion_file:
+            raise ValueError("SONIC requires --sonic_model_dir and --motion_file; --policy_path is for BeyondMimic")
+        if args.add_noise:
+            raise ValueError("SONIC observation noise is not supported; omit --add_noise")
+        if args.domain_randomization:
+            raise ValueError("SONIC uses nominal dynamics; use --experiment_config for explicit physical overrides")
+        if not np.isclose(args.control_dt, 0.02):
+            raise ValueError("SONIC requires --control_dt 0.02 (50 Hz)")
+        from whole_body_tracking.sonic.spec import robot_path
+        args.policy_path = os.path.join(args.sonic_model_dir, "model_decoder.onnx")
+        if args.urdf_file is None and args.xml_file is None:
+            args.urdf_file = robot_path(args.sonic_model_dir)
+    else:
+        if not args.policy_path:
+            raise ValueError("BeyondMimic requires --policy_path")
+        if args.sonic_model_dir or args.trajectory_index:
+            raise ValueError("--sonic_model_dir and --trajectory_index are SONIC options")
+        if args.urdf_file is None and args.xml_file is None:
+            args.urdf_file = DEFAULT_G1_URDF
+    if args.add_noise is None:
+        args.add_noise = args.policy_type == "beyondmimic"
+    if args.domain_randomization is None:
+        args.domain_randomization = args.policy_type == "beyondmimic"
+    if args.sim_dt <= 0 or args.control_dt <= 0 or args.max_steps is not None and args.max_steps <= 0:
+        raise ValueError("Time steps and max_steps must be positive")
     if not os.path.isfile(args.policy_path):
         raise FileNotFoundError(f"Policy not found: {args.policy_path}")
     if args.urdf_file is not None and not os.path.isfile(args.urdf_file):
@@ -250,6 +287,9 @@ def build_eval_config(args: argparse.Namespace, outputs: OutputTargets) -> EvalC
         video_name=args.video_name,
         seed=args.seed,
         experiment=load_experiment(args.experiment_config),
+        policy_type=args.policy_type,
+        sonic_model_dir=args.sonic_model_dir,
+        trajectory_index=args.trajectory_index,
     )
 
 
@@ -260,14 +300,18 @@ def build_runner(config: EvalConfig) -> Sim2SimRunner:
         apply_global_random_seeds(config.seed)
     rng = np.random.default_rng(config.seed)
 
-    policy = OnnxMotionPolicy(config.policy_path, config.policy_device, seed=config.seed)
-    observation_builder = ObservationBuilder(
-        policy.meta,
-        num_envs=config.num_envs,
-        add_noise=config.add_noise,
-        rng=rng,
-        motion_file=config.motion_file,
-    )
+    if config.policy_type == "sonic":
+        from whole_body_tracking.sonic.motion import SonicMotion
+        from whole_body_tracking.sonic.policy import SonicPolicy
+        policy = SonicPolicy(config.sonic_model_dir, SonicMotion(config.motion_file, config.trajectory_index),
+                             config.num_envs, config.policy_device, config.seed)
+        observation_builder = policy.observations
+    else:
+        policy = OnnxMotionPolicy(config.policy_path, config.policy_device, seed=config.seed)
+        observation_builder = ObservationBuilder(
+            policy.meta, num_envs=config.num_envs, add_noise=config.add_noise,
+            rng=rng, motion_file=config.motion_file,
+        )
     scene = GenesisSceneAdapter(
         backend=config.backend,
         sim_dt=config.sim_dt,
@@ -283,11 +327,12 @@ def build_runner(config: EvalConfig) -> Sim2SimRunner:
         anchor_body_name=policy.meta.anchor_body_name,
         domain_randomization=config.domain_randomization,
         seed=config.seed,
+        sonic_spec=policy.meta if config.policy_type == "sonic" else None,
     )
     controller = PdController(
         scene=scene,
-        meta=policy.meta,
-        observation_builder=observation_builder,
+        meta=policy.meta, # type: ignore
+        observation_builder=observation_builder, # type: ignore
         control_dt=config.control_dt,
         sim_dt=config.sim_dt,
         torque_limit=config.torque_limit,
@@ -299,7 +344,7 @@ def build_runner(config: EvalConfig) -> Sim2SimRunner:
     )
     domain_randomizer = DomainRandomizer(
         scene=scene,
-        observation_builder=observation_builder,
+        observation_builder=observation_builder, # type: ignore
         rng=rng,
         control_dt=config.control_dt,
         enabled=config.domain_randomization,
@@ -315,8 +360,10 @@ def build_runner(config: EvalConfig) -> Sim2SimRunner:
             "body_names": np.asarray(scene.log_body_names, dtype=np.object_),
             "default_joint_pos": policy.meta.default_joint_pos.astype(np.float32),
             "action_scale": policy.meta.action_scale.astype(np.float32),
-            "action_mode": "base_policy_raw",
+            "action_mode": "sonic_raw" if config.policy_type == "sonic" else "base_policy_raw",
             "policy_path": config.policy_path,
+            "policy_type": config.policy_type,
+            "policy_metadata_json": json.dumps(getattr(policy, "artifact_metadata", {}), sort_keys=True),
             "motion_file": config.motion_file if config.motion_file is not None else "",
             "backend": config.backend,
             "num_envs": np.array([config.num_envs], dtype=np.int32),

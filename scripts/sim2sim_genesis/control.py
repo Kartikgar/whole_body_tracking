@@ -58,6 +58,9 @@ class PdController:
             joint_pos = self.scene.to_numpy(self.scene.robot.get_dofs_position(self.scene.joint_dof_indices))
             joint_vel = self.scene.to_numpy(self.scene.robot.get_dofs_velocity(self.scene.joint_dof_indices))
             torque = (joint_target - joint_pos) * self.meta.joint_stiffness - joint_vel * self.meta.joint_damping
+            effort_limits = getattr(self.meta, "effort_limits", None)
+            if effort_limits is not None:
+                torque = np.clip(torque, -effort_limits, effort_limits)
             if self.torque_limit is not None:
                 torque = np.clip(torque, -self.torque_limit, self.torque_limit)
             self.scene.call_genesis(

@@ -160,3 +160,45 @@ Below is an overview of the code structure for this repository:
   Includes utility scripts for preprocessing motion data, training policies, and evaluating trained policies.
 
 This structure is designed to ensure modularity and ease of navigation for developers expanding the project.
+
+## NVIDIA SONIC evaluation
+
+The default pretrained NVIDIA SONIC G1 actor can track compatible 29-DoF G1
+motion NPZ files from `data/` in Isaac Lab or Genesis. Download the pinned ONNX
+pair, observation configuration, licenses, and G1 asset into an ignored local
+directory:
+
+```bash
+python scripts/setup_sonic.py --model_dir artifacts/sonic/default
+```
+
+Run it in Isaac Lab:
+
+```bash
+python scripts/run_sonic.py \
+  --sonic_model_dir artifacts/sonic/default \
+  --motion_file data/LAFAN1_Retargeting_Dataset/g1/walk1_subject1.npz
+```
+
+Run the same actor and motion in Genesis:
+
+```bash
+python scripts/eval_sim2sim_genesis.py \
+  --policy_type sonic \
+  --sonic_model_dir artifacts/sonic/default \
+  --motion_file data/LAFAN1_Retargeting_Dataset/g1/walk1_subject1.npz \
+  --viewer --show_reference --compute_metrics
+```
+
+Use `--trajectory_index` for stacked NPZ files. SONIC inputs are resampled to
+50 Hz and must contain `joint_pos`, `joint_vel`, and all six body state arrays.
+Legacy unnamed files are accepted only when their dimensions match this
+repository's G1 exporter. CSV and H1 inputs are not supported by this entrypoint.
+
+`eval_sim2sim_genesis.py` still defaults to `--policy_type beyondmimic`; its
+existing `--policy_path` workflow is unchanged. SONIC uses nominal dynamics by
+default. Pass `--experiment_config` for explicit Genesis physics changes.
+
+The model weights are subject to the NVIDIA Open Model License. Upstream source
+and asset attribution is recorded in `whole_body_tracking/sonic/NOTICE.md` and
+the setup command downloads the upstream license files beside the artifacts.

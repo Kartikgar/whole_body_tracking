@@ -11,7 +11,6 @@ from sim2sim_genesis.config import EvalConfig, default_eval_artifact_path
 from sim2sim_genesis.domain_randomization import DomainRandomizer
 from sim2sim_genesis.metrics import TrackingMetricsEvaluator, compute_metrics_lite
 from sim2sim_genesis.observations import ObservationBuilder
-from sim2sim_genesis.onnx_policy import OnnxMotionPolicy
 from sim2sim_genesis.scene import GenesisSceneAdapter
 from sim2sim_genesis.trajectory_io import TrajectoryRecorder
 
@@ -27,9 +26,9 @@ class Sim2SimRunner:
     def __init__(
         self,
         config: EvalConfig,
-        policy: OnnxMotionPolicy,
+        policy: Any,
         scene: GenesisSceneAdapter,
-        observation_builder: ObservationBuilder,
+        observation_builder: Any,
         controller: Any,
         metrics_evaluator: TrackingMetricsEvaluator,
         domain_randomizer: DomainRandomizer,
@@ -318,6 +317,10 @@ class Sim2SimRunner:
         motion_npz_path = self.trajectory_recorder.save() if self.trajectory_recorder is not None else None
         output = {
             "evaluation_seed": self.config.seed,
+            "policy_type": self.config.policy_type,
+            "policy_metadata_json": __import__("json").dumps(
+                getattr(self.policy, "artifact_metadata", {}), sort_keys=True
+            ),
             "policy_path": self.config.policy_path,
             "motion_file": self.config.motion_file,
             "num_envs": self.config.num_envs,

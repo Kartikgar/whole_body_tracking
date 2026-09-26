@@ -8,5 +8,8 @@ Python module serving as a project/extension template.
 try:
     from .tasks import *
 except ModuleNotFoundError as exc:
-    if exc.name != "isaaclab_tasks":
+    # Utility modules such as SONIC motion/policy adapters do not require a
+    # running Omniverse application. Isaac packages may be installed while
+    # their ``omni`` modules are unavailable until AppLauncher starts.
+    if exc.name != "isaaclab_tasks" and not exc.name.startswith(("omni.", "pxr")):
         raise

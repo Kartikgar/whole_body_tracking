@@ -66,6 +66,7 @@ class GenesisSceneAdapter:
         anchor_body_name: str,
         domain_randomization: bool,
         seed: int | None = None,
+        sonic_spec: Any | None = None,
     ):
         """Initialize Genesis and build the G1 scene for evaluation."""
 
@@ -90,6 +91,7 @@ class GenesisSceneAdapter:
         self.anchor_body_name = anchor_body_name
         self.domain_randomization = bool(domain_randomization)
         self.seed = seed
+        self.sonic_spec = sonic_spec
 
         gs_backend = gs.gpu if backend == "gpu" else gs.cpu
         if seed is not None:
@@ -156,6 +158,14 @@ class GenesisSceneAdapter:
                 raise RuntimeError(f"Only 1-DoF joints are supported. Joint '{joint_name}' has multiple DoFs.")
             self.joint_qs_indices.append(int(joint.qs_idx_local[0]))
             self.joint_dof_indices.append(int(joint.dofs_idx_local[0]))
+
+        if self.sonic_spec is not None:
+            dofs = self.joint_dof_indices
+            self.call_genesis(self.robot.set_dofs_armature, self.sonic_spec.armature, dofs)
+            # Explicit PD control supplies damping; keep the simulator's passive damping at zero.
+            self.call_genesis(self.robot.set_dofs_damping, np.zeros_like(self.sonic_spec.armature), dofs)
+            self.call_genesis(self.robot.set_dofs_force_range, -self.sonic_spec.effort_limits,
+                              self.sonic_spec.effort_limits, dofs)
 
         self.body_links = [self.robot.get_link(name) for name in self.meta_body_names]
         self.log_body_names = list(self.meta_body_names)
