@@ -900,8 +900,11 @@ class MotionCommand(CommandTerm):
         self.time_steps += 1
         trajectory_lengths = self.motion.trajectory_time_step_total[self.trajectory_ids]
         required_future_steps = max(int(self.cfg.required_future_steps), 0)
-        env_ids = torch.where(self.time_steps + required_future_steps >= trajectory_lengths)[0]
-        self._resample_command(env_ids)
+        if self.cfg.hold_last_frame:
+            self.time_steps = torch.minimum(self.time_steps, trajectory_lengths - 1)
+        else:
+            env_ids = torch.where(self.time_steps + required_future_steps >= trajectory_lengths)[0]
+            self._resample_command(env_ids)
 
         anchor_pos_w_repeat = self.anchor_pos_w[:, None, :].repeat(1, len(self.cfg.body_names), 1)
         heading_quat_w_repeat = self.heading_quat_w[:, None, :].repeat(1, len(self.cfg.body_names), 1)
@@ -1005,6 +1008,7 @@ class MotionCommandCfg(CommandTermCfg):
     equal_trajectory_sampling: bool = True
     sample_time_steps: bool = True
     required_future_steps: int = 0
+    hold_last_frame: bool = False
 
     adaptive_kernel_size: int = 1
     adaptive_lambda: float = 0.8

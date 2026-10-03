@@ -180,6 +180,27 @@ python scripts/run_sonic.py \
   --motion_file data/LAFAN1_Retargeting_Dataset/g1/walk1_subject1.npz
 ```
 
+For a batch of motions, edit `configs/sonic/isaac_batch_example.yaml` and run:
+
+```bash
+python scripts/eval_sonic_batch_isaac.py \
+  --config configs/sonic/isaac_batch_example.yaml --headless --device cuda:0
+```
+
+The YAML lists motion NPZ paths, the SONIC model directory, an output directory,
+the number of parallel Isaac environments, a seed, and uniform initial joint
+noise in radians. Paths are relative to the YAML file. Each motion starts at
+frame zero and runs through its full valid length, with one reset per environment.
+Each environment contributes one rollout. A timestamped output folder contains
+one common `summary.csv` row per motion, a detailed JSON and a log per motion,
+and a padded NPZ of policy actions and robot states with `valid_lengths` and
+initial states. Each motion also gets an MP4 with a camera following env 0;
+set `record_video: false` in the YAML to skip capture. The MP4 path appears in
+the CSV. Failed rollouts are preserved in the CSV and NPZ. The command
+exits nonzero if any rollout ends early. The `body_position_error` and
+`body_velocity_error` columns are in meters and meters per second;
+`body_acceleration_error` is in meters per second squared.
+
 Run the same actor and motion in Genesis:
 
 ```bash
@@ -202,3 +223,44 @@ default. Pass `--experiment_config` for explicit Genesis physics changes.
 The model weights are subject to the NVIDIA Open Model License. Upstream source
 and asset attribution is recorded in `whole_body_tracking/sonic/NOTICE.md` and
 the setup command downloads the upstream license files beside the artifacts.
+
+## Motion-specific G1 checkpoint batch
+
+`artifacts/checkpoints/` contains 11 LAFAN1 G1 tracking checkpoints with matching
+motion NPZ files. The separate checkpoint batch YAML lists every pair, including
+the full `walk1_subject1.npz` clip. Validate or run it from this repository root:
+
+```bash
+python scripts/eval_checkpoint_batch_isaac.py \
+  --config configs/sonic/isaac_checkpoint_batch_example.yaml --validate_only
+python scripts/eval_checkpoint_batch_isaac.py \
+  --config configs/sonic/isaac_checkpoint_batch_example.yaml --headless --device cuda:0
+```
+
+The batch uses `play.py` checkpoint inference with 100 environments per motion,
+frame-zero starts, uniform initial joint noise of ±0.01 rad, and no other domain
+randomization. Each environment contributes one full-clip rollout, ending at its
+first tracking failure or the last reference frame. A timestamped folder under
+`logs/checkpoint_batch/` contains the resolved config, `summary.csv`, per-motion
+JSON and process logs, a compressed padded NPZ with `valid_lengths` and initial
+states, and an env-0 MP4. Set `record_video: false` to skip MP4 capture.
+Failures remain in the summary and make the batch exit nonzero after all motions
+have been attempted. Metrics use the G1 task's 14 reference bodies and should
+not be compared numerically with SONIC's 30-body metrics.
+After a result is saved, the Isaac child gets 10 seconds to close gracefully;
+the batch launcher terminates it if it is still alive after 30 seconds and
+continues to the next motion. A shutdown timeout is recorded in `summary.csv`.
+
+Both Isaac batch evaluators also report `safety_*` metrics per rollout in JSON
+and mean/worst values in `summary.csv`. These cover stance foot-link horizontal
+motion, non-support contact events/time/peak force magnitude, hard and soft joint
+position-limit margins and violations, and actuator speed/effort limit
+utilization. The JSON
+lists the bodies with non-support contacts and the worst joint for each limit
+measure. Foot contact uses a 10 N net-force threshold; contact on body links
+other than the two ankle and two wrist links uses 1 N, matching the tracking
+task's undesired-contact convention. Stance foot speed above 0.1 m/s is counted
+as slip time. This is an ankle-link motion proxy, not measured sole contact-point
+slip. Applied effort is the implicit actuator's estimated, clipped effort. The
+speed reference comes from the G1 actuator configuration. Interpret contact
+counts for `fallAndGetUp` clips with their intended contact sequence in mind.

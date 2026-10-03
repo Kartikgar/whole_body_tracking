@@ -21,6 +21,12 @@ parser.add_argument(
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--motion_file", type=str, default=None, help="Path to the motion file.")
+parser.add_argument("--seed", type=int, default=None, help="Seed for deterministic evaluation.")
+parser.add_argument("--batch_eval", action="store_true", help="Run one full-clip checkpoint evaluation per environment.")
+parser.add_argument("--batch_spawn_joint_noise_rad", type=float, default=0.01)
+parser.add_argument("--batch_output_json", type=str, default=None)
+parser.add_argument("--batch_output_npz", type=str, default=None)
+parser.add_argument("--batch_video_folder", type=str, default=None)
 parser.add_argument(
     "--low_level_policy_1_checkpoint",
     type=str,
@@ -224,6 +230,7 @@ from source_metrics import (
     resolve_motion_body_names,
 )
 from utils import DEFAULT_STATE_ACTION_KEYS, StateActionTrajectoryRecorder
+from checkpoint_batch_eval import run_checkpoint_batch_eval
 
 ANKLE_DELTA_ACTION_JOINT_NAMES = [
     "left_ankle_pitch_joint",
@@ -1050,6 +1057,39 @@ def _bootstrap_motion_reference_startup(env: RslRlVecEnvWrapper):
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Play with RSL-RL agent."""
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
+    if args_cli.batch_eval:
+        if args_cli.task != "Tracking-Flat-G1-v0":
+            raise ValueError("Batch evaluation supports Tracking-Flat-G1-v0 only")
+        if not args_cli.motion_file or not args_cli.checkpoint or not args_cli.batch_output_json or not args_cli.batch_output_npz:
+            raise ValueError("Batch evaluation requires motion_file, checkpoint, batch_output_json and batch_output_npz")
+        if args_cli.batch_spawn_joint_noise_rad < 0:
+            raise ValueError("batch_spawn_joint_noise_rad must be nonnegative")
+        with np.load(args_cli.motion_file, allow_pickle=False) as motion_data:
+            joint_pos = motion_data["joint_pos"]
+            if joint_pos.ndim != 2:
+                raise ValueError("Checkpoint batch currently requires a single-trajectory motion NPZ")
+            motion_frames = int(joint_pos.shape[0])
+            motion_fps = float(np.asarray(motion_data["fps"]).reshape(-1)[0])
+        if motion_frames < 2:
+            raise ValueError("Motion must have at least two frames")
+        control_dt = float(env_cfg.sim.dt) * int(env_cfg.decimation)
+        if not np.isclose(motion_fps, 1.0 / control_dt, rtol=0.0, atol=1.0e-3):
+            raise ValueError(f"Motion fps {motion_fps} must match control rate {1.0 / control_dt}")
+        env_cfg.episode_length_s = (motion_frames + 2) * control_dt
+        env_cfg.sim.device = args_cli.device
+        agent_cfg.device = args_cli.device
+        env_cfg.commands.motion.hold_last_frame = True
+        env_cfg.commands.motion.pose_range = {name: (0.0, 0.0) for name in ("x", "y", "z", "roll", "pitch", "yaw")}
+        env_cfg.commands.motion.velocity_range = dict(env_cfg.commands.motion.pose_range)
+        noise = args_cli.batch_spawn_joint_noise_rad
+        env_cfg.commands.motion.joint_position_range = (-noise, noise)
+        env_cfg.scene.contact_forces.history_length = int(env_cfg.decimation)
+        for term_name in ("anchor_pos", "anchor_ori", "ee_body_pos"):
+            setattr(env_cfg.terminations, term_name, None)
+        _disable_domain_randomization(env_cfg)
+        env_cfg.seed = args_cli.seed if args_cli.seed is not None else 0
+        torch.manual_seed(env_cfg.seed)
+        np.random.seed(env_cfg.seed)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     if _has_motion_command(env_cfg):
         env_cfg.commands.motion.adaptive_alpha = 0.0
@@ -1134,7 +1174,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print("[INFO]: This task has no motion command; ignoring --motion_file.")
     _configure_delta_action_space(env_cfg)
     _configure_hierarchical_switch_policies(env_cfg)
-    if args_cli.disable_dr:
+    if args_cli.disable_dr and not args_cli.batch_eval:
         _disable_domain_randomization(env_cfg)
 
     # create isaac environment
@@ -1145,7 +1185,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     ckpt_stem = os.path.splitext(os.path.basename(resume_path))[0]
     # wrap for video recording
-    if args_cli.video:
+    if args_cli.video and not args_cli.batch_eval:
         video_kwargs = {
             "video_folder": os.path.join(log_dir, "videos", f"play_{timestamp}_{ckpt_stem}"),
             "step_trigger": lambda step: step == 0,
@@ -1169,6 +1209,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # obtain the trained policy for inference
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
+    if args_cli.batch_eval:
+        try:
+            run_checkpoint_batch_eval(
+                env=env,
+                policy=policy,
+                simulation_app=simulation_app,
+                checkpoint=resume_path,
+                motion_file=motion_file_override,
+                motion_frames=motion_frames,
+                seed=env_cfg.seed,
+                spawn_joint_noise_rad=args_cli.batch_spawn_joint_noise_rad,
+                output_json=args_cli.batch_output_json,
+                output_npz=args_cli.batch_output_npz,
+                video_folder=(args_cli.batch_video_folder or str(pathlib.Path(args_cli.batch_output_json).with_suffix("")) + "_video")
+                if args_cli.video else None,
+                capture_reference=capture_motion_reference,
+                capture_state=_resolve_robot_state_components_for_logging,
+                bootstrap=_bootstrap_motion_reference_startup,
+                metadata=_resolve_state_action_metadata,
+            )
+        finally:
+            env.close()
+        return
     if args_cli.replay_motion_actions_only:
         print("[INFO]: Replaying motion actions only (policy actions are forced to zero each step).")
     if ppo_runner.delta_policy is not None:
@@ -1570,7 +1633,37 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
 
 if __name__ == "__main__":
-    # run the main function
-    main()
-    # close sim app
-    simulation_app.close()
+    if args_cli.batch_eval:
+        # Kit can remain busy in close() after the rollout and its result files
+        # are complete. Bound cleanup so the batch launcher can continue.
+        import threading
+        import traceback
+
+        exit_code = 0
+        try:
+            main()
+        except BaseException:
+            traceback.print_exc()
+            exit_code = 1
+
+        close_failed = []
+
+        def close_isaac() -> None:
+            try:
+                simulation_app.close(wait_for_replicator=False)
+            except BaseException:
+                traceback.print_exc()
+                close_failed.append(True)
+
+        close_thread = threading.Thread(target=close_isaac, daemon=True)
+        close_thread.start()
+        close_thread.join(timeout=10.0)
+        if close_thread.is_alive():
+            print("[Checkpoint batch] Isaac close exceeded 10 s; exiting process.", flush=True)
+            exit_code = 1
+        if close_failed:
+            exit_code = 1
+        os._exit(exit_code)
+    else:
+        main()
+        simulation_app.close()

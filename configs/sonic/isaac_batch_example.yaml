@@ -1,0 +1,20 @@
+# Paths are relative to this YAML file.
+sonic_model_dir: ../../artifacts/sonic/default
+output_dir: ../../logs/sonic_batch
+num_envs: 100
+seed: 42
+spawn_joint_noise_rad: 0.01
+record_video: true
+motions:
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/walk1_subject1_s0e500.npz
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/walk1_subject2.npz
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/jumps1_subject1.npz
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/jumps1_subject2.npz
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/dance1_subject1.npz
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/dance1_subject2.npz
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/fallAndGetUp1_subject1.npz
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/fallAndGetUp1_subject4.npz
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/run1_subject2.npz
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/run1_subject5.npz
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/sprint1_subject2.npz
+    trajectory_index: 0

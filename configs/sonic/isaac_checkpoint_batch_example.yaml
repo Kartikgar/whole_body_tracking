@@ -1,0 +1,29 @@
+# Paths are relative to this YAML file. Each checkpoint tracks its full motion clip.
+output_dir: ../../logs/checkpoint_batch
+num_envs: 100
+seed: 42
+spawn_joint_noise_rad: 0.01
+record_video: true
+motions:
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/walk1_subject1.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/walk1_subject2.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/jumps1_subject1.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/jumps1_subject2.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject2/model_26000.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/dance1_subject1.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/dance1_subject2.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/fallAndGetUp1_subject1.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_fallAndGetUp1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/fallAndGetUp1_subject4.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_fallAndGetUp1_subject4/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/run1_subject2.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/run1_subject5.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject5/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/sprint1_subject2.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
