@@ -1,0 +1,220 @@
+# Paths are relative to this YAML file. Each segment uses its parent-motion checkpoint.
+# Generated from the 20 s PgS2R-mini clips; final segments may be shorter.
+output_dir: ../../logs/checkpoint_batch/pgs2r_mini
+num_envs: 100
+seed: 42
+spawn_joint_noise_rad: 0.01
+record_video: true
+motions:
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject1__000.00s-020.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject1__020.00s-040.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject1__040.00s-060.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject1__060.00s-080.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject1__080.00s-100.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject1__100.00s-120.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject1__120.00s-140.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject1__140.00s-160.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject1__160.00s-180.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject1__180.00s-200.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject1__200.00s-220.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject1__220.00s-240.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject1__240.00s-260.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject1__260.00s-261.30s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject2__000.00s-020.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject2__020.00s-040.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject2__040.00s-060.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject2__060.00s-080.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject2__080.00s-100.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject2__100.00s-120.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject2__120.00s-140.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject2__140.00s-160.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject2__160.00s-180.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject2__180.00s-200.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject2__200.00s-220.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject2__220.00s-240.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject2__240.00s-260.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/walk1_subject2__260.00s-261.30s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_walk1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject1__000.00s-020.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject1__020.00s-040.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject1__040.00s-060.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject1__060.00s-080.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject1__080.00s-100.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject1__100.00s-120.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject1__120.00s-140.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject1__140.00s-160.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject1__160.00s-180.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject1__180.00s-200.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject1__200.00s-220.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject1__220.00s-240.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject1__240.00s-244.44s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject2__000.00s-020.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject2/model_26000.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject2__020.00s-040.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject2/model_26000.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject2__040.00s-060.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject2/model_26000.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject2__060.00s-080.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject2/model_26000.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject2__080.00s-100.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject2/model_26000.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject2__100.00s-120.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject2/model_26000.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject2__120.00s-140.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject2/model_26000.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject2__140.00s-160.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject2/model_26000.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject2__160.00s-180.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject2/model_26000.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject2__180.00s-200.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject2/model_26000.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject2__200.00s-220.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject2/model_26000.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject2__220.00s-240.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject2/model_26000.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/jumps1_subject2__240.00s-244.44s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_jumps1_subject2/model_26000.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject1__000.00s-020.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject1__020.00s-040.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject1__040.00s-060.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject1__060.00s-080.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject1__080.00s-100.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject1__100.00s-120.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject1__120.00s-131.48s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject1/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject2__000.00s-020.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject2__020.00s-040.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject2__040.00s-060.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject2__060.00s-080.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject2__080.00s-100.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject2__100.00s-120.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject2__120.00s-131.48s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_dance1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject2__000.00s-020.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject2__020.00s-040.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject2__040.00s-060.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject2__060.00s-080.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject2__080.00s-100.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject2__100.00s-120.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject2__120.00s-140.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject2__140.00s-160.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject2__160.00s-180.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject2__180.00s-200.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject2__200.00s-220.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject2__220.00s-237.80s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject5__000.00s-020.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject5/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject5__020.00s-040.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject5/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject5__040.00s-060.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject5/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject5__060.00s-080.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject5/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject5__080.00s-100.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject5/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject5__100.00s-120.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject5/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject5__120.00s-140.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject5/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject5__140.00s-160.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject5/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject5__160.00s-180.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject5/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject5__180.00s-200.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject5/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject5__200.00s-220.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject5/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/run1_subject5__220.00s-237.80s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_run1_subject5/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/sprint1_subject2__000.00s-020.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/sprint1_subject2__020.00s-040.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/sprint1_subject2__040.00s-060.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/sprint1_subject2__060.00s-080.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/sprint1_subject2__080.00s-100.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/sprint1_subject2__100.00s-120.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/sprint1_subject2__120.00s-140.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/sprint1_subject2__140.00s-160.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/sprint1_subject2__160.00s-180.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/sprint1_subject2__180.00s-200.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/sprint1_subject2__200.00s-220.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/sprint1_subject2__220.00s-240.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/sprint1_subject2__240.00s-260.00s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
+  - path: ../../data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/sprint1_subject2__260.00s-273.10s.npz
+    checkpoint: ../../artifacts/checkpoints/lafan_sprint1_subject2/model_29999.pt
