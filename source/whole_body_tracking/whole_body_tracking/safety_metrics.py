@@ -8,7 +8,7 @@ import numpy as np
 
 
 FOOT_BODIES = ("left_ankle_roll_link", "right_ankle_roll_link")
-ALLOWED_CONTACT_BODIES = (*FOOT_BODIES, "left_wrist_yaw_link", "right_wrist_yaw_link")
+ALLOWED_CONTACT_BODIES = FOOT_BODIES
 FOOT_CONTACT_FORCE_N = 10.0
 OTHER_CONTACT_FORCE_N = 1.0
 SLIP_SPEED_MPS = 0.1
