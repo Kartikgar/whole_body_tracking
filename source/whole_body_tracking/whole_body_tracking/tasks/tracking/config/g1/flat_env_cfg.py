@@ -293,7 +293,7 @@ class G1FlatDeltaAOpenLoopEnvCfg(G1FlatEnvCfg):
         self.observations.policy.enable_corruption = False
         self.observations.critic.enable_corruption = False
 
-        self.episode_length_s = 1.0
+        self.episode_length_s = 10.0
 
 
 @configclass
@@ -343,7 +343,7 @@ class G1FlatDeltaAFineTuneEnvCfg(G1FlatEnvCfg):
         # self.observations.policy.enable_corruption = False
         # self.observations.critic.enable_corruption = False
 
-        self.episode_length_s = 1.0
+        self.episode_length_s = 10.0
         # self.terminations.ee_body_pos = None
         # self.terminations.anchor_pos = None
 
@@ -374,10 +374,10 @@ class G1FlatDeltaWrenchOpenLoopEnvCfg(G1FlatDeltaAOpenLoopEnvCfg):
         self.rewards.action_rate_l2 = None
         self.rewards.pelvis_wrench_rate_l2 = RewTerm(
             func=mdp.pelvis_wrench_rate_l2,
-            weight=-0.02,
+            weight=-1.0,
             params={"action_name": "joint_pos"},
         )
-        self.episode_length_s = 1.0
+        self.episode_length_s = 10.0
 
 
 @configclass
@@ -386,4 +386,4 @@ class G1FlatDeltaWrenchFineTuneEnvCfg(G1FlatDeltaAFineTuneEnvCfg):
         super().__post_init__()
         self.actions.joint_pos = mdp.ExternalDeltaPelvisWrenchActionCfg(
             asset_name="robot", joint_names=[".*"], use_default_offset=True, scale=G1_ACTION_SCALE)
-        self.episode_length_s = 1.0
+        self.episode_length_s = 10.0
