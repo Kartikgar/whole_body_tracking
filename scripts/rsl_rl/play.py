@@ -27,6 +27,8 @@ parser.add_argument("--batch_spawn_joint_noise_rad", type=float, default=0.01)
 parser.add_argument("--batch_output_json", type=str, default=None)
 parser.add_argument("--batch_output_npz", type=str, default=None)
 parser.add_argument("--batch_video_folder", type=str, default=None)
+parser.add_argument("--export_onnx_path", type=str, default=None,
+                    help="Export the loaded motion policy and active reference to this ONNX path, including in batch mode.")
 parser.add_argument(
     "--low_level_policy_1_checkpoint",
     type=str,
@@ -1211,6 +1213,36 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
     if args_cli.batch_eval:
         try:
+            if args_cli.export_onnx_path:
+                output_path = pathlib.Path(args_cli.export_onnx_path).resolve()
+                export_motion_policy_as_onnx(
+                    env.unwrapped, ppo_runner.alg.policy, normalizer=ppo_runner.obs_normalizer,
+                    path=str(output_path.parent), filename=output_path.name,
+                )
+                attach_onnx_metadata(env.unwrapped, resume_path, str(output_path.parent), filename=output_path.name)
+                import onnx
+                import onnxruntime as ort
+
+                model = onnx.load(str(output_path))
+                for key, value in {"checkpoint_path": resume_path, "motion_file": motion_file_override}.items():
+                    entry = model.metadata_props.add()
+                    entry.key, entry.value = key, value
+                onnx.checker.check_model(model)
+                onnx.save(model, str(output_path))
+                # Verify the deployment actor against the actual loaded checkpoint before recording.
+                export_obs, _ = env.reset()
+                with torch.inference_mode():
+                    expected_actions = policy(export_obs[:1]).detach().cpu().numpy()
+                options = ort.SessionOptions()
+                options.intra_op_num_threads = options.inter_op_num_threads = 1
+                session = ort.InferenceSession(str(output_path), sess_options=options,
+                                               providers=["CPUExecutionProvider"])
+                actual_actions = session.run(["actions"], {
+                    "obs": export_obs[:1].detach().cpu().numpy(),
+                    "time_step": np.zeros((1, 1), dtype=np.float32),
+                })[0]
+                np.testing.assert_allclose(actual_actions, expected_actions, rtol=1e-4, atol=1e-4)
+                print(f"[INFO]: Exported and verified batch ONNX policy: {output_path}", flush=True)
             run_checkpoint_batch_eval(
                 env=env,
                 policy=policy,
@@ -1335,9 +1367,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # Export ONNX only for motion-command tasks, since exporter metadata expects `commands.motion`.
     if _has_motion_command(env_cfg) and getattr(_get_pelvis_wrench_term(env.unwrapped), "deployment_export", True):
-        export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
+        export_model_dir = (str(pathlib.Path(args_cli.export_onnx_path).resolve().parent)
+                            if args_cli.export_onnx_path else os.path.join(os.path.dirname(resume_path), "exported"))
         checkpoint_stem = os.path.splitext(os.path.basename(resume_path))[0]
-        onnx_filename = f"{checkpoint_stem if checkpoint_stem else 'policy'}.onnx"
+        onnx_filename = (pathlib.Path(args_cli.export_onnx_path).name if args_cli.export_onnx_path
+                         else f"{checkpoint_stem if checkpoint_stem else 'policy'}.onnx")
 
         export_motion_policy_as_onnx(
             env.unwrapped,
