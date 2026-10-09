@@ -24,8 +24,8 @@ def quat_normalize_wxyz(quaternion: np.ndarray) -> np.ndarray:
 def quat_mul_wxyz(lhs: np.ndarray, rhs: np.ndarray) -> np.ndarray:
     """Multiply two ``wxyz`` quaternion arrays elementwise."""
 
-    w1, x1, y1, z1 = np.moveaxis(lhs, -1, 0)
-    w2, x2, y2, z2 = np.moveaxis(rhs, -1, 0)
+    w1, x1, y1, z1 = (lhs[..., i] for i in range(4))
+    w2, x2, y2, z2 = (rhs[..., i] for i in range(4))
     w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
     x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
     y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
@@ -38,8 +38,14 @@ def quat_rotate_wxyz(quaternion: np.ndarray, vector: np.ndarray) -> np.ndarray:
 
     quaternion_xyz = quaternion[..., 1:]
     quaternion_w = quaternion[..., :1]
-    temp = 2.0 * np.cross(quaternion_xyz, vector)
-    return vector + quaternion_w * temp + np.cross(quaternion_xyz, temp)
+    # Explicit 3D products avoid np.cross's internal moveaxis dependency.
+    def cross3(lhs, rhs):
+        return np.stack((lhs[..., 1] * rhs[..., 2] - lhs[..., 2] * rhs[..., 1],
+                         lhs[..., 2] * rhs[..., 0] - lhs[..., 0] * rhs[..., 2],
+                         lhs[..., 0] * rhs[..., 1] - lhs[..., 1] * rhs[..., 0]), axis=-1)
+
+    temp = 2.0 * cross3(quaternion_xyz, vector)
+    return vector + quaternion_w * temp + cross3(quaternion_xyz, temp)
 
 
 def quat_rotate_inverse_wxyz(quaternion: np.ndarray, vector: np.ndarray) -> np.ndarray:
@@ -52,7 +58,7 @@ def quat_to_matrix_wxyz(quaternion: np.ndarray) -> np.ndarray:
     """Convert a ``wxyz`` quaternion array to rotation matrices."""
 
     normalized = quat_normalize_wxyz(quaternion)
-    w, x, y, z = np.moveaxis(normalized, -1, 0)
+    w, x, y, z = (normalized[..., i] for i in range(4))
 
     ww = w * w
     xx = x * x
