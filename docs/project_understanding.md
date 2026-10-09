@@ -1,139 +1,41 @@
-# Project Understanding
+# Purpose and research workflow
 
-This document records a working understanding of the `whole_body_tracking` project, with emphasis on the current Delta-A sim2real pipeline and the intended deployment story.
+[Documentation index](README.md)
 
-## 1) Repository Role
+## What this project investigates
 
-This repository is the Isaac Lab training side of the BeyondMimic motion-tracking stack.
+HumSim2Real extends BeyondMimic whole-body tracking for the Unitree G1. The research objective is to learn corrections to source-simulator dynamics and understand how well those corrections generalize across humanoid motions, especially from safer motions to riskier ones.
 
-At a high level, it provides:
+The repository supports two tracking behaviors: pretrained NVIDIA SONIC and motion-specific BeyondMimic checkpoints. Their rollouts support difficulty/safety ranking, executed-behavior relevance analysis, and selecting motion pairs for transfer experiments. Genesis provides a target simulation environment in which base policies can be evaluated and their state/action trajectories recorded.
 
-- motion preprocessing and replay utilities
-- G1 humanoid tracking environments in Isaac Lab
-- PPO training and playback scripts through RSL-RL
-- Delta-A open-loop pretraining and Delta-A-assisted finetuning
-- ONNX export and Genesis sim2sim evaluation utilities
+## The role of a delta model
 
-The main custom code lives under:
+A delta model observes the current robot state and base joint action. It adds a joint correction or pelvis wrench in Isaac so that the resulting transition resembles the recorded target transition:
 
-- `source/whole_body_tracking/whole_body_tracking/tasks/tracking/`
-- `source/whole_body_tracking/whole_body_tracking/robots/`
-- `source/whole_body_tracking/whole_body_tracking/utils/`
-- `scripts/rsl_rl/`
+`T_Isaac_with_delta(s, a_base) ≈ T_target(s, a_base)`
 
-## 2) Core Training Workflow
+The target can differ through simulator physics, contact handling, actuators, or explicit physical-property changes. The learned delta is a dynamics-emulation helper. Its current intended deployment role is training-time assistance: optionally finetune a base tracking policy in the delta-assisted source environment, then deploy the base policy alone in the target environment.
 
-The main workflow appears to be:
+## End-to-end workflow
 
-1. Prepare retargeted motion data as `.npz`.
-2. Train a base tracking policy in Isaac Lab.
-3. Optionally train an open-loop Delta-A policy that models a source-to-target dynamics gap.
-4. Finetune a base tracking policy while injecting the frozen delta policy during rollout.
-5. Export the finetuned policy and evaluate in Genesis as a target simulator.
+1. **Prepare reference motions.** Retargeted LAFAN1 NPZ clips include joint/body reference states. PgS2R-mini splits parent motions into approximately 20-second segments.
+2. **Evaluate tracking behaviors.** Run SONIC or parent-motion checkpoints over clips. Record parallel rollouts, completion, tracking and safety measurements.
+3. **Choose transfer candidates.** Rank difficulty and safety separately. Compare executed window features and inspect captions/videos to select behaviorally relevant motion pairs.
+4. **Record target state/action data.** Run exported base policies in Genesis. Preserve valid lengths and raw joint actions, including early failures.
+5. **Train delta models.** Replay recorded joint actions in Isaac while learning corrections that reproduce target states. Combine trajectory datasets to study how target-motion examples affect generalization.
+6. **Measure generalization before finetuning.** Evaluate one delta checkpoint on a supplied validation dataset from multiple initial states over fixed replay windows. Compare with zero delta under identical settings.
+7. **Optionally finetune and deploy.** Freeze the learned delta, train the base policy, export the base actor, and measure target-simulator performance.
 
-Relevant scripts:
+Current transfer experiments use jump-only, walk-only, jump/dance and walk/dance compositions, plus a dance-trained reference model. These are experiment choices; the evaluator accepts arbitrary compatible checkpoints and datasets.
 
-- `scripts/csv_to_npz.py`
-- `scripts/replay_npz.py`
-- `scripts/rsl_rl/train.py`
-- `scripts/rsl_rl/play.py`
-- `scripts/rsl_rl/evaluate_sim2sim_genesis.py`
+## Three evaluations answer different questions
 
-## 3) Tracking Task Structure
+- **Full-clip tracking:** can a closed-loop base policy finish the motion, and how safe is its execution?
+- **Delta replay:** given a recorded initial state and fixed recorded joint-action sequence, how accurately does the corrected source reproduce the target states?
+- **Finetuned deployment:** does a base policy trained with delta assistance improve closed-loop target tracking without the helper?
 
-The tracking task is manager-based and decomposed in the standard Isaac Lab style.
+Completion of a replay window means valid numerical execution. It does not imply a fall-free or successful tracking rollout. Low replay error supports dynamics matching on the tested distribution; it does not by itself establish deployment transfer.
 
-Important modules:
+## Where to go next
 
-- `tasks/tracking/mdp/commands.py`
-  - motion loading
-  - motion sampling
-  - reference-state queries
-- `tasks/tracking/mdp/observations.py`
-  - tracking observations
-  - delta-policy observations
-- `tasks/tracking/mdp/rewards.py`
-  - tracking rewards and delta penalties
-- `tasks/tracking/mdp/delta_actions.py`
-  - open-loop delta action composition
-  - finetune-time external delta composition
-- `tasks/tracking/config/g1/flat_env_cfg.py`
-  - G1 tracking task variants
-
-## 4) Delta-A: Current Intended Meaning
-
-The intended role of the delta policy in this project is:
-
-- the delta policy is a training-time helper that makes the source simulator behave more like a target environment with shifted dynamics
-- the target dynamics mismatch should live in the target environment, not in the nominal source simulator
-- during deployment in the target environment, the delta policy is not meant to be used
-- the deployed controller is the finetuned base policy alone
-
-This means the conceptual goal of Delta-A finetuning is **not** necessarily to make the base policy numerically copy the delta outputs.
-
-Instead, the goal is:
-
-`T_source_with_delta(s, a_base) ~= T_target(s, a_base)`
-
-If that equivalence holds closely enough, then a base policy trained in the delta-assisted source environment should transfer to the target environment without requiring the delta policy at deployment.
-
-## 5) Important Distinction
-
-There are two different ways to think about the delta policy:
-
-1. **Controller composition view**
-   - The executed action during finetuning is `base_action + delta_action`.
-   - In this view, one may worry that the base policy depends on the delta branch.
-
-2. **Dynamics emulation view**
-   - The delta policy is treated as a mechanism to emulate the target environment inside the source simulator.
-   - In this view, the finetuned base policy only needs to become good under the effective target-like dynamics induced by the delta helper.
-
-The current project understanding is that the second view is the intended one.
-
-## 6) Practical Risk in the Current Delta-A Setup
-
-Even if the intended interpretation is correct, successful transfer still depends on one critical condition:
-
-the delta-assisted source dynamics must match the real target dynamics closely enough over the state-action distribution visited by the finetuned base policy.
-
-This is stronger than simply observing that:
-
-- the open-loop delta policy trains well
-- the finetuning reward increases
-- the combined controller performs well in Isaac
-
-Those facts only show that the assisted source setup is internally workable. They do not by themselves prove that the effective transition map matches the true target environment closely enough for deployment.
-
-## 7) Current Working Hypothesis for Sim2Sim Failure
-
-If a finetuned policy performs well in Isaac with Delta-A assistance but poorly in Genesis, plausible explanations include:
-
-1. The delta-assisted source dynamics are not actually equivalent to the Genesis target dynamics.
-2. The target gain perturbation used in Genesis does not match the target shift that Delta-A was intended to emulate.
-3. Contact, solver, actuator, or timing differences dominate beyond a simple Kp/Kd mismatch.
-4. The finetuned base policy only experienced a target-like environment through an imperfect learned helper, so transfer fails when the true target simulator differs from that helper-induced dynamics.
-
-Under this interpretation, poor Genesis performance is not immediate evidence that Delta-A is conceptually wrong. It may instead indicate that the learned delta helper is not an accurate enough surrogate for the target simulator.
-
-## 8) What Would Validate the Delta-A Assumption
-
-The most direct validation experiment would be to compare:
-
-- `source simulator + delta helper + base action`
-- `target simulator + base action`
-
-starting from matched states and using matched base-policy actions.
-
-If the next-state trajectories are close, then the delta helper is serving its intended role.
-If they diverge significantly, then the learned delta policy is acting more like a helpful auxiliary controller than a true target-dynamics emulator.
-
-## 9) Deployment Interpretation
-
-Current understanding of deployment:
-
-- open-loop delta policy: training artifact
-- frozen delta policy during finetuning: training artifact
-- finetuned base policy: deployment policy
-
-This is the interpretation that should guide future debugging, documentation, and evaluation.
+Use [training commands](training_and_evaluation_commands.md) for execution, [batch ranking](batch_evaluation_and_ranking.md) for motion selection, and [delta replay](delta_replay_evaluation.md) for controlled model comparisons. Consult [model interfaces](model_interfaces.md) before changing observations or action representations.

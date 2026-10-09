@@ -1,3 +1,5 @@
+> Historical implementation reference. Some layouts, defaults and commands describe earlier versions. Start with the [current documentation](../README.md), [training guide](../training_and_evaluation_commands.md), and [model interfaces](../model_interfaces.md). Use saved run configs for existing checkpoints.
+
 # Modular Genesis Sim2Sim Evaluator
 
 This document describes the new modular Genesis sim2sim pipeline introduced alongside the legacy evaluator.
@@ -5,7 +7,7 @@ This document describes the new modular Genesis sim2sim pipeline introduced alon
 ## Entry Points
 
 - Legacy evaluator: `scripts/rsl_rl/evaluate_sim2sim_genesis.py`
-- New modular evaluator: `scripts/evaluate_sim2sim_genesis.py`
+- New modular evaluator: `scripts/eval_sim2sim_genesis.py`
 
 The legacy script remains untouched and still acts as the behavioral reference implementation.
 
@@ -56,7 +58,7 @@ This perturbation is independent of `--seed`.
 Recommended smoke-test command:
 
 ```bash
-python scripts/evaluate_sim2sim_genesis.py \
+python scripts/eval_sim2sim_genesis.py \
   --policy_path /path/to/base_policy.onnx \
   --backend cpu \
   --policy_device cpu \

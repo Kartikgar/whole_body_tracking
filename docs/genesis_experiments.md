@@ -1,5 +1,7 @@
 # Genesis physical-property experiments
 
+[Documentation index](README.md)
+
 Run from `whole_body_tracking`:
 
 ```bash

@@ -1,13 +1,15 @@
 # Pelvis-wrench dynamics emulation
 
+[Documentation index](README.md)
+
 Train a wrench in nominal Isaac to reproduce loaded-robot trajectories recorded
 in Genesis. The target mass override is an absolute mass: use nominal pelvis mass
 plus payload mass. Genesis's installed mass setter also scales inertia.
 
 The new tasks preserve the corresponding Delta-A tracking rewards, observations,
-terminations, and 1-second horizon. The legacy open-loop joint-action magnitude
+terminations, and a configurable episode horizon (currently 10 seconds). The legacy open-loop joint-action magnitude
 and action-rate penalties are disabled. The open-loop wrench task does apply a
-separate wrench-rate penalty (`pelvis_wrench_rate_l2`, default weight `-0.02`)
+separate wrench-rate penalty (`pelvis_wrench_rate_l2`, current default weight `-1.0`)
 to discourage step-to-step changes in the six-dimensional wrench. Fine-tuning
 retains base joint-action regularization. Existing joint-delta and COM-force
 tasks are unchanged.
@@ -100,7 +102,7 @@ actor observation layout under `infos.pelvis_wrench`. Loading, playback, and
 frozen ensembles reject incompatible contracts. Nominal base checkpoints remain
 valid for initializing fine-tuning. Changing the wrench mapping requires a new
 training run; pass training overrides again when loading its checkpoint.
-Keep the accompanying `params/agent.yaml` for frozen-policy architecture loading.
+Keep the complete `params/` directory. Frozen-policy loading uses agent configuration; dedicated replay requires `params/env.pkl` and `params/agent.pkl`.
 
 Open-loop wrench policies are training artifacts and skip deployment ONNX export.
 Fine-tuned export contains only the base joint-action policy, usable by the
@@ -112,7 +114,7 @@ mean vector norms, and per-axis saturation fractions. Repeated saturation warran
 examining trajectory mismatch and increasing the affected scale before retraining.
 Force and torque arrow visualization is not included.
 
-## Validation performed
+## Historical integration validation
 
 CPU unit tests cover scaling/clipping, joint replay, shape validation, reset
 isolation, logging statistics, and checkpoint compatibility. GPU smoke tests

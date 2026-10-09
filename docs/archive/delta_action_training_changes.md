@@ -1,3 +1,5 @@
+> Historical implementation reference. Some layouts, defaults and commands describe earlier versions. Start with the [current documentation](../README.md), [training guide](../training_and_evaluation_commands.md), and [model interfaces](../model_interfaces.md). Use saved run configs for existing checkpoints.
+
 # Delta Action Training: Changes and ASAP Correspondence
 
 This document summarizes the delta-action training implementation added in this codebase, and maps each part to the corresponding behavior in ASAP.

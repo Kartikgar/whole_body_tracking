@@ -1,5 +1,7 @@
 # Episode Length, Resets, and Motion Sampling
 
+[Documentation index](README.md)
+
 This note summarizes how **RL episode length** relates to **motion clip length**, when **commands and motion references reset**, and how **starting frames and trajectories** are chosen in the tracking tasks. It reflects the behavior implemented in Isaac Lab’s command manager plus this repository’s `MotionCommand`.
 
 ## Two Different Horizons

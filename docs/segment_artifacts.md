@@ -1,5 +1,7 @@
 # Segment demo and Genesis policy artifacts
 
+[Documentation index](README.md)
+
 Run from `whole_body_tracking` using the Isaac Lab Python environment:
 
 ```bash

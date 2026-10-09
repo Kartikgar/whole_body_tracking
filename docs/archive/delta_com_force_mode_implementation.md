@@ -1,3 +1,5 @@
+> Historical implementation reference. Some layouts, defaults and commands describe earlier versions. Start with the [current documentation](../README.md), [training guide](../training_and_evaluation_commands.md), and [model interfaces](../model_interfaces.md). Use saved run configs for existing checkpoints.
+
 # Delta COM-Force Mode: Implementation and Debugging Guide
 
 This document explains the **delta-action COM-force mode** for both open-loop training and delta-policy finetuning.

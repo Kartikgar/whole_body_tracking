@@ -1,6 +1,8 @@
 # Captioning motion segments
 
-`scripts/caption_motion_segments.py` creates short, chronological descriptions
+[Documentation index](README.md)
+
+`scripts/vlm_caption_motion.py` creates short, chronological descriptions
 for NPZ/MP4 pairs such as the clips in `data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini`.
 It uses root height, body tilt, and motion changes from the NPZ to place roughly
 five-second windows near movement transitions. A local video VLM describes each
@@ -9,22 +11,22 @@ window. A second text pass supplies a clip summary and short action labels.
 The script needs a CUDA-enabled Python environment with `torch`, `transformers`
 (with Qwen3-VL support), `opencv-python`, `Pillow`, and `numpy`. The matching
 MP4 must be beside each NPZ. Qwen3-VL-4B-Instruct is the tested model; model
-weights are stored locally under the ignored `artifacts/models/` directory.
+weights are stored locally under the ignored `artifacts/VLM/` directory.
 For example, download the [Apache-2.0 checkpoint](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct)
 with `huggingface_hub.snapshot_download` into
-`artifacts/models/Qwen3-VL-4B-Instruct`.
+`artifacts/VLM/Qwen3-VL-4B-Instruct`.
 
 From the `whole_body_tracking` directory, inspect the window plan without a GPU:
 
 ```bash
-python scripts/caption_motion_segments.py \
+python scripts/vlm_caption_motion.py \
   --input-dir data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini --plan-only
 ```
 
 Caption selected clips before running the full directory:
 
 ```bash
-python scripts/caption_motion_segments.py \
+python scripts/vlm_caption_motion.py \
   --input-dir data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini \
   --motion jumps1_subject2__200.00s-220.00s \
   --motion jumps1_subject2__220.00s-240.00s \

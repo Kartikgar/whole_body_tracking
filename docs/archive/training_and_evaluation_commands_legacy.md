@@ -1,0 +1,643 @@
+> Historical implementation reference. Some layouts, defaults and commands describe earlier versions. Start with the [current documentation](../README.md), [training guide](../training_and_evaluation_commands.md), and [model interfaces](../model_interfaces.md). Use saved run configs for existing checkpoints.
+
+# Training and evaluation commands (G1 tracking and delta policies)
+
+Reference for training and evaluating the three policy stages in this repo:
+
+| Stage | Task ID | Purpose |
+|-------|---------|---------|
+| 1. Base tracking | `Tracking-Flat-G1-v0` | Standard whole-body motion tracking |
+| 2. Open-loop delta | `Tracking-Flat-G1-DeltaA-OpenLoop-v0` | Learn residual dynamics on top of motion `action`/`actions` |
+| 3. Finetune base + frozen delta | `Tracking-Flat-G1-DeltaA-Finetune-v0` | Train base policy with frozen open-loop delta injected at rollout |
+
+All commands below assume you are in the **`whole_body_tracking/`** repo root, with Isaac Lab installed and the package editable-installed:
+
+```bash
+cd /path/to/whole_body_tracking
+python -m pip install -e source/whole_body_tracking
+```
+
+Use your Isaac Lab conda/env when launching scripts (see [README](../README.md)).
+
+**Log layout:** checkpoints go under `logs/rsl_rl/<experiment_name>/<YYYY-MM-DD_HH-MM-SS>_<run_name>/model_*.pt`, with `params/agent.yaml` and `params/env.yaml` saved per run. Default experiment folders (from `rsl_rl_ppo_cfg.py`):
+
+- Base: `2026.10.14/g1_base_policies`
+- Delta open-loop: `2026.10.14/g1_delta_policies`
+- Finetune: `2026.10.14/g1_finetuned_policies`
+
+---
+
+## Pipeline order
+
+```text
+Motion NPZ  -->  (1) Train base tracking
+                      |
+                      v
+              (2) Train open-loop delta  (motion NPZ must include action/actions)
+                      |
+                      v
+              (3) Finetune base with --delta_policy_checkpoints <open-loop model.pt> [...]
+                      |
+                      v
+              Deploy: play.py exports finetuned base ONNX; Genesis eval uses base only
+```
+
+---
+
+## Motion data (shared prerequisite)
+
+### Convert CSV retarget to NPZ (optional upload to WandB registry)
+
+```bash
+python scripts/NPZ_utils/csv_to_npz.py \
+  --input_file /path/to/motion.csv \
+  --input_fps 30 \
+  --output_name my_motion \
+  --headless
+```
+
+### Replay motion in Isaac (sanity check)
+
+```bash
+# From WandB registry
+python scripts/NPZ_utils/replay_npz.py \
+  --registry_name your-org/wandb-registry-motions/my_motion
+
+# Or local file (if your replay script supports it)
+python scripts/NPZ_utils/replay_npz.py --motion_file /path/to/motion.npz
+```
+
+### Motion file requirements by stage
+
+| Stage | Motion NPZ |
+|-------|------------|
+| Base tracking | Standard motion fields (`joint_pos`, `body_pos_w`, etc.) |
+| Delta open-loop | Same **plus** per-frame `action` or `actions` (reference joint commands used as `motion_joint_action`) |
+| Finetune | Standard motion NPZ (no motion `action` required in obs; base uses motion-tracking obs) |
+
+For training, provide motion via **`--motion_file`** (local) or **`--registry_name`** (WandB artifact containing `motion.npz`). Local path is preferred for delta work.
+
+### Merge motion NPZ files with different lengths
+
+`scripts/NPZ_utils/merge_motion_npz.py` combines single-clip or stacked NPZ files into a
+stacked motion file. It supports inputs with different time dimensions and
+respects an input `valid_lengths` array, copying only each trajectory's valid
+frames and padding the output by repeating its last valid frame. This is useful
+for combining Genesis datasets or bootstrapped motion sets:
+
+```bash
+python scripts/NPZ_utils/merge_motion_npz.py \
+  /path/to/walk.npz /path/to/jump_variants.npz /path/to/dance.npz \
+  --output /path/to/combined_motions.npz
+```
+
+The output includes `valid_lengths` for every trajectory; the shared time axis
+is padded to the longest valid trajectory. Inputs must have compatible motion
+fields and metadata (including joint/body names and action conventions when
+present).
+
+---
+
+## 1. Base tracking policy
+
+**Task:** `Tracking-Flat-G1-v0`\
+**Runner cfg:** `G1FlatPPORunnerCfg` (`max_iterations=30000`, `save_interval=500`)
+
+### Train
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-v0 \
+  --registry_name your-org/wandb-registry-motions/my_motion \
+  --num_envs 4096 \
+  --headless \
+  --logger wandb \
+  --log_project_name whole_body_tracking \
+  --run_name g1_flat_my_motion
+```
+
+Local motion file instead of registry:
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-v0 \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 4096 \
+  --headless \
+  --run_name g1_flat_local_motion
+```
+
+### Train without domain randomization
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-v0 \
+  --motion_file /abs/path/to/motion.npz \
+  --disable_dr \
+  --num_envs 4096 \
+  --headless \
+  --run_name g1_flat_no_dr
+```
+
+### Resume training
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-v0 \
+  --motion_file /abs/path/to/motion.npz \
+  --resume True \
+  --checkpoint /abs/path/to/logs/rsl_rl/.../model_5000.pt \
+  --num_envs 4096 \
+  --headless
+```
+
+Or resume from a WandB run (downloads latest `model_*.pt` unless path includes a specific checkpoint name):
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-v0 \
+  --motion_file /abs/path/to/motion.npz \
+  --resume True \
+  --wandb_path your-entity/your-project/run_id \
+  --num_envs 4096 \
+  --headless
+```
+
+### Evaluate in Isaac Lab (`play.py`)
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-v0 \
+  --checkpoint /abs/path/to/model_30000.pt \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 4
+```
+
+```bash
+# WandB checkpoint (optionally append /model_30000.pt to pin a file)
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-v0 \
+  --wandb_path your-entity/your-project/run_id \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 4
+```
+
+```bash
+# Latest checkpoint under logs/rsl_rl/<experiment_name>/ (uses agent load_run settings)
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-v0 \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 4
+```
+
+**Notes:**
+
+- `play.py` runs `env.reset()` + motion bootstrap, disables adaptive reference sampling, and exports **base policy ONNX** to `<checkpoint_dir>/exported/<checkpoint_stem>.onnx`.
+- Add `--video` for viewport recording; `--disable_dr` to match no-DR training.
+
+For motion-command tasks, `play.py` also computes source-simulator tracking
+metrics automatically. At exit it writes a JSON summary under
+`<checkpoint_run>/source_metrics/`, alongside step-weighted and trajectory-level
+tracking statistics. This runs whether or not rollout datasets are being
+recorded.
+
+### Record state–action rollouts (Isaac, for sim2sim comparison)
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-v0 \
+  --checkpoint /abs/path/to/model_30000.pt \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 64 \
+  --disable_dr \
+  --record_state_action_trajectories \
+  --state_action_target_trajectories 100 \
+  --output_state_action_npz /abs/path/to/out/base_state_action.npz \
+  --headless
+```
+
+### Genesis sim2sim (deployed base policy only)
+
+After `play.py`, use the exported ONNX:
+
+```bash
+python scripts/rsl_rl/evaluate_sim2sim_genesis.py \
+  --policy_path /abs/path/to/checkpoint_dir/exported/model_30000.onnx \
+  --urdf_file source/whole_body_tracking/whole_body_tracking/assets/unitree_description/urdf/g1/main.urdf \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 64 \
+  --backend cpu \
+  --policy_device cpu \
+  --output_csv logs/sim2sim_eval/g1_base_eval.csv
+```
+
+### Transfer validation: Isaac (base + frozen δ) → Genesis (base-only open-loop)
+
+**Goal:** test `Isaac(base + frozen_delta) ≈ Genesis(replay base_actions)` from matched initial states.\
+Delta is **never** replayed in Genesis (deployment-style base-only control).
+
+**1. Record source trajectories in Isaac** (stage-1 base or stage-3 finetuned base + **same frozen stage-2 delta**):
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --checkpoint /abs/path/to/base_or_finetuned_base/model_XXXX.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_YYYY.pt \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 50 \
+  --disable_dr \
+  --delta_policy_clip_actions 5.0 \
+  --record_state_action_trajectories \
+  --state_action_target_trajectories 50 \
+  --headless
+```
+
+NPZ includes `initial_*`, `base_actions`, `delta_actions`, post-step source states (`joint_pos`, `body_pos_w`, …), and metadata (`joint_names`, `body_names`, `action_scale`, `action_mode=base_plus_delta_states`).
+
+To apply the frozen delta only on a fraction of finetuning episodes, set an
+episode-level injection probability. The mask is sampled independently for
+each environment on reset and remains fixed for that episode. The default is
+`1.0` (delta active every episode); `0.0` disables it:
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --resume True \
+  --checkpoint /abs/path/to/base/model_XXXX.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_YYYY.pt \
+  --motion_file /abs/path/to/motion.npz \
+  --delta_policy_injection_probability 0.5 \
+  --num_envs 4096 --headless
+```
+
+Use the same option with `play.py` to evaluate at a chosen probability. Training
+logs the realized `DeltaInjection/active_fraction`; playback prints the
+configured probability and initial active fraction.
+
+**2. Replay logged base actions open-loop in Genesis** (metadata from exported **base** ONNX):
+
+```bash
+python scripts/replay_openloop_genesis.py \
+  --state_action_npz /abs/path/to/state_action_datasets/model_XXXX_state_action_....npz \
+  --policy_path /abs/path/to/checkpoint_dir/exported/model_XXXX.onnx \
+  --urdf_file source/whole_body_tracking/whole_body_tracking/assets/unitree_description/urdf/g1/main.urdf \
+  --backend cpu \
+  --control_dt 0.02 \
+  --num_envs 50
+```
+
+**3. Compare source vs replay state trajectories:**
+
+```bash
+python scripts/scratch/compare_transfer_trajectories.py \
+  /abs/path/to/isaac_state_action.npz \
+  /abs/path/to/isaac_state_action_genesis_base_replay_....npz \
+  --compare both
+```
+
+By default this writes two overlays: policy-relative `joint_pos` and world-frame `body_pos_w` (aligned by `body_names`). Use `--compare joints` or `--compare bodies` to plot one only.
+
+### Source-simulation tracking metrics and trajectory counts
+
+The source metrics JSON is written automatically by `play.py` for motion-command
+tasks, including delta finetuning playback. Its trajectory-level averages use
+every trajectory finalized by the metrics tracker, including partial active
+trajectories when playback exits. Dataset recorders have their own target count
+and can save a capped set of completed trajectories. Consequently, a metrics
+summary and a recorded NPZ can cover different trajectory counts; when comparing
+policies, inspect the JSON's trajectory count and the NPZ's trajectory count
+rather than assuming the recorder's requested `N` also caps source metrics.
+
+**Interpretation:** post–stage-2 success means frozen delta already makes Genesis(base) track Isaac(base+δ). Stage-3 base finetune is optional A/B with the **same frozen delta checkpoint**.
+
+---
+
+## 2. Open-loop delta action policy
+
+**Task:** `Tracking-Flat-G1-DeltaA-OpenLoop-v0`\
+**Runner cfg:** `G1FlatDeltaActPPORunnerCfg` (`max_iterations=10000`)\
+**Action:** policy output is **delta**; env combines `delta + motion_joint_action` before scaling (see `DeltaJointPositionAction`).
+
+### Train (joint delta, default `whole_body`)
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-DeltaA-OpenLoop-v0 \
+  --motion_file /abs/path/to/motion_with_actions.npz \
+  --num_envs 4096 \
+  --max_iterations 10000 \
+  --headless \
+  --run_name walk1_sub1_delta_openloop
+```
+
+Hydra-style overrides (optional):
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-DeltaA-OpenLoop-v0 \
+  --motion_file /abs/path/to/motion_with_actions.npz \
+  --num_envs 4096 \
+  --headless \
+  agent.save_interval=100 \
+  agent.max_iterations=20000
+```
+
+### Train without DR
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-DeltaA-OpenLoop-v0 \
+  --motion_file /abs/path/to/motion_with_actions.npz \
+  --disable_dr \
+  --num_envs 4096 \
+  --headless \
+  --run_name delta_openloop_no_dr
+```
+
+### Train COM-force delta (optional mode)
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-DeltaA-OpenLoop-v0 \
+  --motion_file /abs/path/to/motion.npz \
+  --delta_action_space com_force \
+  --delta_com_force_scale 1.0 \
+  --delta_com_force_clip 1.0 \
+  --num_envs 4096 \
+  --headless
+```
+
+### Resume
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-DeltaA-OpenLoop-v0 \
+  --motion_file /abs/path/to/motion_with_actions.npz \
+  --resume True \
+  --checkpoint /abs/path/to/logs/rsl_rl/.../g1_delta_policies/.../model_5000.pt \
+  --num_envs 4096 \
+  --headless
+```
+
+### Evaluate in Isaac Lab
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-DeltaA-OpenLoop-v0 \
+  --checkpoint /abs/path/to/delta_model_9999.pt \
+  --motion_file /abs/path/to/motion_with_actions.npz \
+  --num_envs 4 \
+  --disable_dr
+```
+
+Replay **only** motion NPZ actions (zero learned delta):
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-DeltaA-OpenLoop-v0 \
+  --checkpoint /abs/path/to/delta_model_9999.pt \
+  --motion_file /abs/path/to/motion_with_actions.npz \
+  --replay_motion_actions_only \
+  --num_envs 4 \
+  --headless
+```
+
+### Record delta open-loop dataset (for analysis / plots)
+
+Records **policy delta** observations and actions (not combined joint targets):
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-DeltaA-OpenLoop-v0 \
+  --checkpoint /abs/path/to/delta_model_9999.pt \
+  --motion_file /abs/path/to/motion_with_actions.npz \
+  --num_envs 64 \
+  --disable_dr \
+  --record_delta_model_dataset \
+  --delta_dataset_target_trajectories 100 \
+  --output_delta_model_npz /abs/path/to/out/delta_openloop_rollout.npz \
+  --headless
+```
+
+Default output if `--output_delta_model_npz` is omitted:
+
+`<checkpoint_dir>/delta_model_datasets/<checkpoint_stem>_<timestamp>.npz`
+
+### Plot open-loop rollouts (scratch scripts)
+
+```bash
+python scripts/scratch/plot_delta_openloop_rollout.py \
+  /abs/path/to/delta_model_datasets/model_9999_....npz
+
+python scripts/scratch/plot_state_action_trajectories.py \
+  /abs/path/to/state_action_datasets/model_9999_state_action_....npz
+```
+
+---
+
+## 3. Finetune base policy with frozen delta
+
+**Task:** `Tracking-Flat-G1-DeltaA-Finetune-v0`\
+**Runner cfg:** `G1FlatDeltaAFineTunePPORunnerCfg`\
+**Requires:** `--delta_policy_checkpoints` with one or more trained **open-loop** delta checkpoints (`model_*.pt`).
+
+At each env step during training: base policy acts; frozen delta reads the `delta_policy` obs group (proprio + `current_action` from the same-step base output); env applies `base + delta` via `ExternalDeltaJointPositionAction`. PPO updates **only the base policy**.
+
+**Delta loading behavior:**
+
+| Checkpoints passed | Inference |
+|--------------------|-----------|
+| 1 | That policy's delta action is injected directly (no uncertainty gating) |
+| 2+ | Mean delta across members, scaled by `exp(-scale * uncertainty)` via `--delta_policy_uncertainty_gate_scale` (default `1.0`) |
+
+Pass each ensemble member explicitly. There is no automatic sibling-run discovery.
+
+### Train (single frozen delta)
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --motion_file /abs/path/to/motion.npz \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_9999.pt \
+  --num_envs 4096 \
+  --headless \
+  --run_name finetune_walk1_frozen_delta
+```
+
+Optional: initialize finetune from a **base** checkpoint via resume (base weights); still pass frozen delta:
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --motion_file /abs/path/to/motion.npz \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_9999.pt \
+  --resume True \
+  --checkpoint /abs/path/to/base_tracking/model_30000.pt \
+  --num_envs 4096 \
+  --headless
+```
+
+### Train with delta ensemble
+
+Pass every open-loop delta checkpoint you want in the ensemble:
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --motion_file /abs/path/to/motion.npz \
+  --delta_policy_checkpoints \
+    /abs/path/to/open_loop_delta/EB1/model_800.pt \
+    /abs/path/to/open_loop_delta/EB2/model_800.pt \
+    /abs/path/to/open_loop_delta/EB3/model_800.pt \
+  --delta_policy_uncertainty_gate_scale 1.0 \
+  --resume True \
+  --checkpoint /abs/path/to/base_tracking/model_30000.pt \
+  --num_envs 4096 \
+  --headless \
+  --run_name finetune_walk1_delta_ensemble
+```
+
+### Finetune with COM-force frozen delta
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --motion_file /abs/path/to/motion.npz \
+  --delta_policy_checkpoints /abs/path/to/open_loop_com_force_model.pt \
+  --delta_action_space com_force \
+  --delta_com_force_scale 1.0 \
+  --delta_com_force_clip 1.0 \
+  --num_envs 4096 \
+  --headless
+```
+
+### Evaluate in Isaac Lab (base + frozen delta)
+
+**Important:** `play.py` does **not** auto-load `delta_policy_checkpoints` from the finetune run's `agent.yaml` — pass them explicitly.
+
+Single delta:
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --checkpoint /abs/path/to/finetuned_model_5000.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_9999.pt \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 4 \
+  --disable_dr
+```
+
+Delta ensemble:
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --checkpoint /abs/path/to/finetuned_model_5000.pt \
+  --delta_policy_checkpoints \
+    /abs/path/to/open_loop_delta/EB1/model_800.pt \
+    /abs/path/to/open_loop_delta/EB2/model_800.pt \
+    /abs/path/to/open_loop_delta/EB3/model_800.pt \
+  --delta_policy_uncertainty_gate_scale 1.0 \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 4 \
+  --disable_dr
+```
+
+With video:
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --checkpoint /abs/path/to/finetuned_model_5000.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_9999.pt \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 4 \
+  --disable_dr \
+  --video
+```
+
+### Record finetune rollout dataset
+
+With frozen delta loaded, logging records **delta branch** obs/actions (not base-only):
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --checkpoint /abs/path/to/finetuned_model_5000.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_9999.pt \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 64 \
+  --disable_dr \
+  --record_delta_model_dataset \
+  --delta_dataset_target_trajectories 100 \
+  --headless
+```
+
+Plot finetune action breakdown:
+
+```bash
+python scripts/scratch/plot_delta_finetune_actions.py \
+  /abs/path/to/delta_model_datasets/finetuned_....npz
+```
+
+### Deploy / Genesis eval (finetuned **base** only)
+
+`play.py` exports ONNX from the **finetuned base actor** only (frozen delta is not in the ONNX). Genesis evaluation matches deployment:
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tracking-Flat-G1-DeltaA-Finetune-v0 \
+  --checkpoint /abs/path/to/finetuned_model_5000.pt \
+  --delta_policy_checkpoints /abs/path/to/open_loop_delta/model_9999.pt \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 1 \
+  --headless
+# ONNX written to: <checkpoint_dir>/exported/<stem>.onnx
+
+python scripts/rsl_rl/evaluate_sim2sim_genesis.py \
+  --policy_path /abs/path/to/finetuned/exported/finetuned_model_5000.onnx \
+  --urdf_file source/whole_body_tracking/whole_body_tracking/assets/unitree_description/urdf/g1/main.urdf \
+  --motion_file /abs/path/to/motion.npz \
+  --num_envs 64 \
+  --backend cpu \
+  --policy_device cpu \
+  --output_csv logs/sim2sim_eval/g1_finetuned_base_eval.csv
+```
+
+---
+
+## Common CLI flags (train & play)
+
+| Flag | Scripts | Meaning |
+|------|---------|---------|
+| `--task` | both | Gym task ID (see table at top) |
+| `--motion_file` | both | Override `commands.motion.motion_file` |
+| `--registry_name` | train | WandB motion artifact (if no `--motion_file`) |
+| `--num_envs` | both | Parallel env count |
+| `--headless` | both | No GUI (via AppLauncher) |
+| `--device cuda:0` | both | Simulation device |
+| `--disable_dr` | both | Turn off event DR and obs corruption/noise |
+| `--max_iterations` | train | Override PPO iteration budget |
+| `--run_name` | train | Suffix on log directory name |
+| `--logger wandb` | train | WandB logging |
+| `--log_project_name` | train | WandB project |
+| `--resume True` | train | Resume from checkpoint |
+| `--checkpoint` | both | Absolute path to `model_*.pt` |
+| `--wandb_path` | both | `entity/project/run` or `.../run/model_X.pt` |
+| `--delta_policy_checkpoints` | train, play | One or more frozen open-loop delta checkpoints for finetune/play |
+| `--delta_policy_injection_probability` | train, play | Per-episode probability of enabling frozen delta assistance during finetune (default `1.0`) |
+| `--delta_policy_uncertainty_gate_scale` | train, play | Ensemble gating scale when 2+ delta checkpoints are passed (default `1.0`; ignored for a single checkpoint) |
+| `--delta_action_space` | both | `whole_body` (default), `ankles`, `lower_body`, `com_force` |
+| `--record_delta_model_dataset` | play | NPZ delta obs/actions |
+| `--record_state_action_trajectories` | play | NPZ joint/body state + applied actions |
+| `--video` | both | Record rollout video |
+
+---
+
+## Related documentation
+
+- [play_evaluation_workflows.html](../play_evaluation_workflows.html) — detailed `play.py` behavior per policy type, ONNX export, finetune step loop
+- [delta_action_finetuning_implementation.md](delta_action_finetuning_implementation.md) — frozen delta wiring in `MotionOnPolicyRunner`
+- [delta_action_training_changes.md](delta_action_training_changes.md) — env/obs/reward differences for delta tasks
+- [delta_com_force_mode_implementation.md](delta_com_force_mode_implementation.md) — COM-force delta variant
+- [README](../README.md) — install, WandB motion registry, original BeyondMimic commands

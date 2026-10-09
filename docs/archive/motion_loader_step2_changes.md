@@ -1,3 +1,5 @@
+> Historical implementation reference. Some layouts, defaults and commands describe earlier versions. Start with the [current documentation](../README.md), [training guide](../training_and_evaluation_commands.md), and [model interfaces](../model_interfaces.md). Use saved run configs for existing checkpoints.
+
 # Motion Loader Revamp (Step 2)
 
 This document summarizes the Step 2 implementation for motion dataset loading:
@@ -52,7 +54,7 @@ Shapes inside each motion dict:
 
 File:
 
-- [commands.py](/home/kartikgarg/whole_body_tracking/source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py)
+- [commands.py](../../source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py)
 
 Main updates:
 
@@ -68,9 +70,9 @@ Main updates:
 
 Implementation references:
 
-- format dispatch and outputs: `MotionLoader.__init__` ([commands.py](/home/kartikgarg/whole_body_tracking/source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py#L41))
-- legacy parsing: `_parse_stacked_format` ([commands.py](/home/kartikgarg/whole_body_tracking/source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py#L100))
-- per-motion parsing: `_parse_per_motion_format` ([commands.py](/home/kartikgarg/whole_body_tracking/source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py#L228))
+- format dispatch and outputs: `MotionLoader.__init__` ([commands.py](../../source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py))
+- legacy parsing: `_parse_stacked_format` ([commands.py](../../source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py))
+- per-motion parsing: `_parse_per_motion_format` ([commands.py](../../source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py))
 
 ## No Padding (Ragged Storage)
 
@@ -89,13 +91,13 @@ Why this is used:
 
 Implementation references:
 
-- frame-index resolver and gather methods in `MotionLoader` ([commands.py](/home/kartikgarg/whole_body_tracking/source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py#L382))
+- frame-index resolver and gather methods in `MotionLoader` ([commands.py](../../source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py))
 
 ## MotionCommand updates for variable lengths
 
 File:
 
-- [commands.py](/home/kartikgarg/whole_body_tracking/source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py)
+- [commands.py](../../source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py)
 
 Main updates:
 
@@ -105,14 +107,14 @@ Main updates:
 
 Implementation references:
 
-- adaptive sampling bin index and sampled step scaling ([commands.py](/home/kartikgarg/whole_body_tracking/source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py#L569))
-- per-env wrap condition in `_update_command` ([commands.py](/home/kartikgarg/whole_body_tracking/source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py#L667))
+- adaptive sampling bin index and sampled step scaling ([commands.py](../../source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py))
+- per-env wrap condition in `_update_command` ([commands.py](../../source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py))
 
 ## Replay script update
 
 File:
 
-- [replay_npz.py](/home/kartikgarg/whole_body_tracking/scripts/replay_npz.py)
+- [replay_npz.py](../../scripts/NPZ_utils/replay_npz.py)
 
 Change:
 
@@ -120,7 +122,7 @@ Change:
 
 Implementation reference:
 
-- [replay_npz.py](/home/kartikgarg/whole_body_tracking/scripts/replay_npz.py#L124)
+- [replay_npz.py](../../scripts/NPZ_utils/replay_npz.py)
 
 ## Compatibility
 
@@ -136,7 +138,7 @@ Static validation:
 ```bash
 python -m py_compile \
   source/whole_body_tracking/whole_body_tracking/tasks/tracking/mdp/commands.py \
-  scripts/replay_npz.py \
+  scripts/NPZ_utils/replay_npz.py \
   source/whole_body_tracking/whole_body_tracking/utils/exporter.py \
   scripts/convert_motion_npz_to_per_motion.py
 ```
@@ -148,6 +150,6 @@ Runtime note:
 ## Related Files
 
 - converter from step 1:
-  - [convert_motion_npz_to_per_motion.py](/home/kartikgarg/whole_body_tracking/scripts/convert_motion_npz_to_per_motion.py)
+  - `convert_motion_npz_to_per_motion.py` (historical file, no longer present)
 - structured change dictionary:
-  - [motion_loader_step2_change_dict.json](/home/kartikgarg/whole_body_tracking/docs/motion_loader_step2_change_dict.json)
+  - [motion_loader_step2_change_dict.json](motion_loader_step2_change_dict.json)
