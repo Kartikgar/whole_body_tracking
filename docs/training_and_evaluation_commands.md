@@ -46,7 +46,7 @@ python scripts/rsl_rl/play.py \
 ## 4. Evaluate transfer before finetuning
 
 ```bash
-python scripts/eval_delta_replay_isaac.py \
+python scripts/Delta_Utils/eval_delta_replay_isaac.py \
   --dataset path/to/validation.npz --checkpoint path/to/delta/model.pt \
   --replay_length_s 2.0 --start_stride_s 0.5 --num_envs 1459 --seed 0
 ```

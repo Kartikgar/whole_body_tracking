@@ -24,6 +24,7 @@ Robot assets must be available under the extension's assets directory. Preserve 
 - `source/whole_body_tracking/whole_body_tracking/safety_metrics.py`: shared batch safety accumulator and definitions.
 - `source/whole_body_tracking/whole_body_tracking/sonic/`: SONIC observation and inference integration.
 - `scripts/rsl_rl/`: training, playback and checkpoint rollout worker.
+- `scripts/Delta_Utils/`: single-checkpoint delta replay evaluation, result aggregation and Matplotlib comparison plots.
 - `scripts/NPZ_utils/`: conversion, replay, extraction, merge and upload utilities.
 - `scripts/sim2sim_genesis/`: Genesis scene, control, observations, metrics, recording and runner modules.
 - `scripts/sim2sim_mujoco/`: separate MuJoCo evaluation implementation.
@@ -44,7 +45,7 @@ Robot assets must be available under the extension's assets directory. Preserve 
 - Rank/relevance: `scripts/rank_motions.py`, `scripts/find_motion_relevance.py`.
 - Segment export: `scripts/prepare_segment_artifacts.py`.
 - Target simulation: `scripts/eval_sim2sim_genesis.py`.
-- Delta replay: `scripts/eval_delta_replay_isaac.py`.
-- Aggregate/plot replay: `scripts/compare_delta_replay_results.py`, `scripts/plot_delta_replay_comparison.py`.
+- Delta replay: `scripts/Delta_Utils/eval_delta_replay_isaac.py`.
+- Aggregate/plot replay: `scripts/Delta_Utils/compare_delta_replay_results.py`, `scripts/Delta_Utils/plot_delta_replay_comparison.py`.
 
 Use `--help` on lightweight launchers for complete options. Training and playback import Isaac and require its runtime even for some help paths. Historical filenames in old experiments do not necessarily match current script locations.

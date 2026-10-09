@@ -2,10 +2,12 @@
 
 [Documentation index](README.md)
 
+The delta test utilities live in `scripts/Delta_Utils/`: the replay evaluator, separate result aggregator, and Matplotlib plotting script.
+
 Run from `whole_body_tracking` using the Isaac Lab Python environment:
 
 ```bash
-python scripts/eval_delta_replay_isaac.py \
+python scripts/Delta_Utils/eval_delta_replay_isaac.py \
   --dataset path/to/recorded_rollouts.npz \
   --checkpoint path/to/delta/model_3600.pt \
   --replay_length_s 2.0 \
@@ -61,7 +63,7 @@ Metrics include endpoint and within-window mean joint position/velocity RMSE, bo
 After running the desired checkpoints independently:
 
 ```bash
-python scripts/compare_delta_replay_results.py \
+python scripts/Delta_Utils/compare_delta_replay_results.py \
   --run model_a=logs/delta_eval/run_a \
   --run model_b=logs/delta_eval/run_b \
   --output_dir logs/delta_eval/comparison
@@ -72,7 +74,7 @@ The comparison utility validates matching data, schedules, batching, seed, and d
 Generate Matplotlib PNG/PDF plots from that comparison:
 
 ```bash
-python scripts/plot_delta_replay_comparison.py \
+python scripts/Delta_Utils/plot_delta_replay_comparison.py \
   --comparison logs/delta_eval/comparison/comparison.json \
   --baseline model_a --title "Validation replay"
 ```
