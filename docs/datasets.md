@@ -26,6 +26,35 @@ The dedicated [replay evaluator](delta_replay_evaluation.md) additionally requir
 
 ## Utilities
 
+### Bootstrap datasets for a delta ensemble
+
+Use a trusted stacked Genesis recording containing only your training pool:
+
+```bash
+python scripts/NPZ_utils/bootstrap_motion_npz.py \
+  path/to/genesis_train.npz --output_dir path/to/bootstrap_sets \
+  --num_sets 5 --seed 42
+```
+
+This writes `genesis_train_btstrap_000.npz` through `genesis_train_btstrap_004.npz`,
+retaining the input filename stem as a prefix. Each contains
+the input trajectory count sampled uniformly **with replacement**. Use
+`--sample_size 100` to choose a different count. Entire padded trajectories,
+actions (including both aliases), initial states and valid lengths are selected
+together. Recording metadata and array dtypes are preserved. The script requires
+only NumPy, without either simulator. Existing outputs are never overwritten.
+
+Each NPZ embeds `bootstrap_source_indices` and `bootstrap_metadata_json`;
+its matching JSON manifest records source SHA-256, seed, member, sampled indices
+and out-of-bag indices. The same seed and input reproduce the same selections.
+The recorded Genesis `seed` remains unchanged; bootstrap seed is separate.
+Custom per-trajectory fields must be named with `--trajectory_keys key1 key2`;
+unknown fields are otherwise preserved as metadata rather than guessed by shape.
+
+Train one delta model per generated NPZ, with separate training seeds if desired.
+Keep validation/test trajectories outside the input pool. Out-of-bag trajectories
+are absent from that member's sample, but are not a shared held-out evaluation set.
+
 ```bash
 python scripts/NPZ_utils/csv_to_npz.py \
   --input_file path/to/retargeted.csv --input_fps 30 --output_name my_motion --headless
