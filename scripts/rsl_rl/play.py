@@ -15,6 +15,11 @@ import cli_args  # isort: skip
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.", allow_abbrev=False)
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
+parser.add_argument("--video_folder", type=str, default=None, help="Output folder for the recorded play video.")
+parser.add_argument("--sample_start_frames", action=argparse.BooleanOptionalAction, default=False,
+                    help="Uniformly sample a reference start frame on each reset (adaptive sampling remains disabled).")
+parser.add_argument("--use_checkpoint_config", action="store_true",
+                    help="Load trusted params/env.pkl and agent.pkl beside the explicitly supplied checkpoint.")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
@@ -1059,6 +1064,35 @@ def _bootstrap_motion_reference_startup(env: RslRlVecEnvWrapper):
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Play with RSL-RL agent."""
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
+    if args_cli.use_checkpoint_config:
+        import pickle
+        if not args_cli.checkpoint:
+            raise ValueError("--use_checkpoint_config requires --checkpoint")
+        checkpoint = pathlib.Path(args_cli.checkpoint).expanduser().resolve()
+        with (checkpoint.parent / "params/env.pkl").open("rb") as f:
+            env_cfg = pickle.load(f)
+        with (checkpoint.parent / "params/agent.pkl").open("rb") as f:
+            agent_cfg = pickle.load(f)
+        spawn = env_cfg.scene.robot.spawn
+        if hasattr(spawn, "asset_path") and not pathlib.Path(spawn.asset_path).is_file():
+            marker = "/source/whole_body_tracking/"
+            if marker not in spawn.asset_path:
+                raise FileNotFoundError(spawn.asset_path)
+            root = pathlib.Path(__file__).resolve().parents[2]
+            asset = root / "source/whole_body_tracking" / spawn.asset_path.split(marker, 1)[1]
+            if not asset.is_file():
+                raise FileNotFoundError(asset)
+            spawn.asset_path = str(asset)
+            if args_cli.video_folder:
+                spawn.usd_dir = str(pathlib.Path(args_cli.video_folder).resolve() / "robot_usd")
+        print(f"[INFO]: Using saved environment and agent configuration from {checkpoint.parent / 'params'}")
+    if args_cli.seed is not None:
+        env_cfg.seed = args_cli.seed
+        agent_cfg.seed = args_cli.seed
+        torch.manual_seed(args_cli.seed)
+        np.random.seed(args_cli.seed)
+    env_cfg.sim.device = args_cli.device
+    agent_cfg.device = args_cli.device
     if args_cli.batch_eval:
         if args_cli.task != "Tracking-Flat-G1-v0":
             raise ValueError("Batch evaluation supports Tracking-Flat-G1-v0 only")
@@ -1095,10 +1129,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     if _has_motion_command(env_cfg):
         env_cfg.commands.motion.adaptive_alpha = 0.0
-        env_cfg.commands.motion.sample_time_steps = False
+        if args_cli.batch_eval and args_cli.sample_start_frames:
+            raise ValueError("Full-clip batch evaluation cannot sample start frames")
+        env_cfg.commands.motion.sample_time_steps = args_cli.sample_start_frames
         print(
             "[INFO]: Adaptive reference sampling is disabled for play "
-            "(commands.motion.adaptive_alpha=0.0, commands.motion.sample_time_steps=False)."
+            f"(commands.motion.adaptive_alpha=0.0, commands.motion.sample_time_steps={args_cli.sample_start_frames})."
         )
         if args_cli.enable_adaptive_reference_sampling:
             print(
@@ -1189,7 +1225,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap for video recording
     if args_cli.video and not args_cli.batch_eval:
         video_kwargs = {
-            "video_folder": os.path.join(log_dir, "videos", f"play_{timestamp}_{ckpt_stem}"),
+            "video_folder": (os.path.abspath(args_cli.video_folder) if args_cli.video_folder else
+                             os.path.join(log_dir, "videos", f"play_{timestamp}_{ckpt_stem}")),
             "step_trigger": lambda step: step == 0,
             "video_length": args_cli.video_length,
             "disable_logger": True,
@@ -1421,6 +1458,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs, _ = env.reset()
     _bootstrap_motion_reference_startup(env)
     obs, _ = env.get_observations()
+    if args_cli.sample_start_frames and _has_motion_command(env_cfg):
+        term = env.unwrapped.command_manager.get_term("motion")
+        print(f"[INFO]: Initial sampled trajectories: {term.trajectory_ids.tolist()}; frames: {term.time_steps.tolist()}")
     prev_motion_time_steps = _get_motion_time_steps(env.unwrapped)
     if state_action_recorder is not None:
         bootstrap_state = _resolve_robot_state_components_for_logging(env.unwrapped)
