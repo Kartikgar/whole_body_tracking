@@ -147,7 +147,7 @@ python scripts/Delta_Utils/eval_delta_replay_isaac.py \
   --measurement_interval_s 0.25 --num_envs 818 --seed 0 \
   --output_dir logs/delta_eval/my_zero_delta_growth
 
-python scripts/Delta_Utils/plot_delta_error_growth.py \
+python scripts/Delta_Utils/plot_replay_error_curves.py single \
   --run_dir logs/delta_eval/my_zero_delta_growth
 ```
 
@@ -171,7 +171,7 @@ python scripts/Delta_Utils/eval_delta_replay_isaac.py \
   --replay_length_s 5 --start_stride_s 0.5 --measurement_interval_s 0.25 \
   --num_envs 818 --seed 0 --output_dir logs/delta_eval/my_ensemble_growth
 
-python scripts/Delta_Utils/plot_delta_ensemble_growth.py \
+python scripts/Delta_Utils/plot_replay_error_curves.py uncertainty \
   --run_dir logs/delta_eval/my_ensemble_growth \
   --baseline_dir logs/delta_eval/my_zero_delta_growth
 ```
@@ -182,13 +182,15 @@ At reset and each sampled post-action state, all members receive the same raw ob
 
 The plotting utility requires a matching zero-delta schedule, seed, environment count, dataset hash, interval and physical contract. It saves aggregate/trajectory disagreement figures and matched error-growth comparisons, with sample CSVs and `ensemble_summary.json`. Its within-horizon error correlations are descriptive because overlapping windows are dependent; disagreement is not a calibrated probability of failure or distribution shift.
 
+The `uncertainty` mode is not limited to ensemble disagreement. Any per-window curve stored in `partial_results.json` can be plotted against true error: choose it with `--signal_field` (default `disagreement_curve`) and `--signal` (default `normalized_disagreement`), the error with `--error_metric`, and the legend labels with `--run_label`/`--baseline_label`.
+
 
 ### Compare ensemble and single-model error growth
 
 Run a single model with the same dataset, checkpoint environment contract, seed, schedule, batching and measurement interval as the ensemble. Then compare any named runs with:
 
 ```bash
-python scripts/Delta_Utils/plot_delta_error_growth_comparison.py \
+python scripts/Delta_Utils/plot_replay_error_curves.py compare \
   --run 'Zero delta=logs/delta_eval/my_zero_delta_growth' \
   --run 'Ensemble mean=logs/delta_eval/my_ensemble_growth' \
   --run 'Single delta=logs/delta_eval/my_single_growth' \
@@ -273,9 +275,12 @@ these values from saved post-action poses, reference frame `step - 1`, and the
 recorded environment-placement offsets. This recovery does not change rollout
 outcomes. Genesis needs these measurements recorded during evaluation.
 
-`plot_closed_loop_ensemble.py` accepts `--exclude_ungated`, `--genesis_dir` and
-`--output_dir` to compare an extended coefficient set without overwriting older
-plots. Available `lambda_2`, `lambda_4`, `lambda_6` and `lambda_8` folders are
-included automatically. The full-horizon figure shows body/joint/root tracking,
-contributor counts and applied gate; each condition stops contributing after its
-own first failures.
+`plot_closed_loop.py metrics --experiment_dir <experiment>` compares every Isaac
+condition folder with the paired Genesis run; `--conditions` selects and orders folders
+(default: discovered as zero delta, ungated, `lambda_*` ascending, `single_*`, then others),
+and `--genesis_dir`/`--output_dir` avoid overwriting older plots. The full-horizon figure
+shows body/joint/root tracking, contributor counts and, for gated arms, the applied gate;
+each condition stops contributing after its own first failures.
+`plot_closed_loop.py states` plots root, joint and body state evolution against the
+reference and the paired distance of each Isaac condition to Genesis; it needs a Genesis
+run recorded with `--record_motion`. Add `--t_max` for a zoomed copy.

@@ -12,7 +12,7 @@ def load(name):
     return module
 
 replay = load('eval_delta_replay_isaac')
-plot = load('plot_delta_error_growth')
+plot = load('plot_replay_error_curves')
 
 class ErrorGrowthTests(unittest.TestCase):
     def test_gate_sweep_schedule(self):

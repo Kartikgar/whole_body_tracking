@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-spec=importlib.util.spec_from_file_location('closed_loop_plot',Path(__file__).resolve().parents[1]/'scripts/Delta_Utils/plot_closed_loop_ensemble.py')
+spec=importlib.util.spec_from_file_location('closed_loop_plot',Path(__file__).resolve().parents[1]/'scripts/Delta_Utils/plot_closed_loop.py')
 plot=importlib.util.module_from_spec(spec);spec.loader.exec_module(plot)
 
 

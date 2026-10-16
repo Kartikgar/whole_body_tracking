@@ -3,13 +3,16 @@
 This isolates runner behavior; it does not claim Isaac physics equivalence.
 """
 import contextlib
+from pathlib import Path
 import io
 import unittest
 from unittest.mock import patch
 
 import torch
 
-from test_optimizer_resume import Runner
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # run by path or by discovery
+from helpers import Runner
 
 
 class ToyEnv:

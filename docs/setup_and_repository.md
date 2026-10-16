@@ -24,7 +24,7 @@ Robot assets must be available under the extension's assets directory. Preserve 
 - `source/whole_body_tracking/whole_body_tracking/safety_metrics.py`: shared batch safety accumulator and definitions.
 - `source/whole_body_tracking/whole_body_tracking/sonic/`: SONIC observation and inference integration.
 - `scripts/rsl_rl/`: training, playback and checkpoint rollout worker.
-- `scripts/Delta_Utils/`: single-checkpoint delta replay evaluation, result aggregation and Matplotlib comparison plots.
+- `scripts/Delta_Utils/`: delta replay evaluation and comparison plots, closed-loop Isaac-vs-Genesis analysis, Genesis ground-truth probes from closed-loop states, and the ensemble-gated finetune sweep. Shared loaders and helpers live in `common.py`.
 - `scripts/NPZ_utils/`: conversion, replay, extraction, merge and upload utilities.
 - `scripts/sim2sim_genesis/`: Genesis scene, control, observations, metrics, recording and runner modules.
 - `scripts/sim2sim_mujoco/`: separate MuJoCo evaluation implementation.
@@ -45,7 +45,9 @@ Robot assets must be available under the extension's assets directory. Preserve 
 - Rank/relevance: `scripts/rank_motions.py`, `scripts/find_motion_relevance.py`.
 - Segment export: `scripts/prepare_segment_artifacts.py`.
 - Target simulation: `scripts/eval_sim2sim_genesis.py`.
-- Delta replay: `scripts/Delta_Utils/eval_delta_replay_isaac.py`; interval-error plots: `scripts/Delta_Utils/plot_delta_error_growth.py`; shared-ensemble diagnostics: `scripts/Delta_Utils/plot_delta_ensemble_growth.py`.
+- Delta replay: `scripts/Delta_Utils/eval_delta_replay_isaac.py`; interval-error curves (`single`, `compare`, `uncertainty`): `scripts/Delta_Utils/plot_replay_error_curves.py`.
 - Aggregate/plot replay: `scripts/Delta_Utils/compare_delta_replay_results.py`, `scripts/Delta_Utils/plot_delta_replay_comparison.py`.
+- Closed loop vs Genesis: `scripts/Delta_Utils/plot_closed_loop.py` (`metrics`, `states`).
+- On-policy simulator gap: `scripts/Delta_Utils/probe_closed_loop_genesis.py` resets Genesis to closed-loop states and replays their actions; score models on the result with `eval_delta_replay_isaac.py`.
 
 Use `--help` on lightweight launchers for complete options. Training and playback import Isaac and require its runtime even for some help paths. Historical filenames in old experiments do not necessarily match current script locations.

@@ -67,6 +67,6 @@ python scripts/NPZ_utils/merge_motion_npz.py \
 
 The merge combines trajectories, rather than joining motions end-to-end. Select the intended trajectory subsets before merging. Shared metadata is preserved when identical; incompatible metadata may be dropped and is reported. Preserve source membership and train/validation separation outside the filename alone.
 
-`extract_motion_segment.py` and `replay_npz_batch_videos.py` in `scripts/NPZ_utils/` support segment preparation and inspection; use their help for exact options. [VLM captions](motion_captioning.md) describe reference videos and are interpretive labels, not ground-truth executed behavior.
+`extract_motion_segment.py`, `replay_npz_batch_videos.py` and `plot_trajectory_support.py` (how many recorded trajectories remain long enough at each time) in `scripts/NPZ_utils/` support segment preparation and inspection; use their help for exact options. [VLM captions](motion_captioning.md) describe reference videos and are interpretive labels, not ground-truth executed behavior.
 
 Historical loader-format details remain in [the archive](archive/motion_loader_step2_changes.md). Current loaders and saved dataset metadata determine compatibility.

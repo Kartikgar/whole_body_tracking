@@ -1,10 +1,8 @@
 """Exercise the real RSL-RL resume/update path without launching Isaac Sim."""
 import contextlib
-import importlib.util
 import io
 from pathlib import Path
 import tempfile
-import types
 import unittest
 from unittest.mock import patch
 
@@ -13,26 +11,9 @@ from rsl_rl.algorithms import PPO
 from rsl_rl.modules import ActorCritic
 
 
-def load_runner_class():
-    # Only export helpers need Isaac; checkpoint loading and PPO run on CPU.
-    exports = types.ModuleType("isaaclab_rl.rsl_rl")
-    exports.export_policy_as_onnx = lambda *args, **kwargs: None
-    motion_exports = types.ModuleType("whole_body_tracking.utils.exporter")
-    motion_exports.attach_onnx_metadata = lambda *args, **kwargs: None
-    motion_exports.export_motion_policy_as_onnx = lambda *args, **kwargs: None
-    path = Path(__file__).resolve().parents[1] / "source/whole_body_tracking/whole_body_tracking/utils/my_on_policy_runner.py"
-    spec = importlib.util.spec_from_file_location("resume_test_runner", path)
-    module = importlib.util.module_from_spec(spec)
-    with patch.dict("sys.modules", {
-        "isaaclab_rl.rsl_rl": exports,
-        "whole_body_tracking.utils.exporter": motion_exports,
-        "wandb": types.ModuleType("wandb"),
-    }):
-        spec.loader.exec_module(module)
-    return module.MotionOnPolicyRunner
-
-
-Runner = load_runner_class()
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # run by path or by discovery
+from helpers import Runner  # noqa: E402
 
 
 class OptimizerResumeTests(unittest.TestCase):
