@@ -45,3 +45,28 @@ offset times for each action. Ground interactions are flagged for review because
 floor rolls and inverted poses can be confused with jumps or handstands. The
 source filename is not sent to the VLM prompt, avoiding label leakage from
 names such as `jumps1`.
+
+## Review videos and edit labels
+
+Run the lightweight review page with any Python 3.10+ interpreter (no extra packages):
+
+```bash
+python scripts/review_motion_labels.py
+```
+
+Open **http://127.0.0.1:8765** in your browser. The default directory is PgS2R-mini.
+Only original MP4s are listed; `*_compressed.mp4` duplicates are excluded.
+Watch a video alongside its editable summary, comma-separated labels, and events.
+Event play buttons seek to their start time. Event times can also be corrected,
+and events can be added or removed. Mark a clip **Reviewed** when finished.
+
+Click **Save** (or Ctrl/Cmd+S); switching clips also saves pending edits. Closing
+the tab with unsaved changes prompts you to return and save. Edits and reviewed
+status persist across restarts in
+`artifacts/motion_reviews/PgS2R-mini/reviews.json`. Generated caption JSONs remain
+intact; the viewer loads your saved corrections in preference to generated fields.
+The separate review file is not automatically consumed by training or search scripts.
+
+Use `--input_dir /path/to/clips`, `--review_file /path/to/reviews.json`, or
+`--port 8766` to change these defaults. Stop the server with Ctrl+C. For a remote
+workspace, forward port 8765 through your editor or SSH before opening the page.

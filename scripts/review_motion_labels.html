@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Motion label review</title>
+<script>
+const themePreference = window.matchMedia('(prefers-color-scheme: dark)');
+let selectedTheme = null;
+try { selectedTheme = localStorage.getItem('motion-review-theme'); } catch {}
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const toggle = document.getElementById('theme-toggle');
+  if (toggle) {
+    toggle.textContent = theme === 'dark' ? 'Light mode' : 'Dark mode';
+    toggle.setAttribute('aria-pressed', String(theme === 'dark'));
+  }
+}
+applyTheme(selectedTheme === 'dark' || selectedTheme === 'light'
+  ? selectedTheme : themePreference.matches ? 'dark' : 'light');
+themePreference.addEventListener('change', event => {
+  if (!selectedTheme) applyTheme(event.matches ? 'dark' : 'light');
+});
+</script>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #fafafa; --text: #242424; --surface: #fff; --border: #ccc;
+    --divider: #ddd; --hover: #eee; --muted: #6b6b6b;
+    --selected-bg: #e3ecf5; --selected-text: #174d7c;
+    --accent: #225a86; --on-accent: #fff; --error: #a32424;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #181b20; --text: #e5e8ec; --surface: #23272e; --border: #484f59;
+    --divider: #343b44; --hover: #30363f; --muted: #a9b1bc;
+    --selected-bg: #233c54; --selected-text: #b9ddff;
+    --accent: #326d9d; --on-accent: #fff; --error: #ff9e9e;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; color: var(--text); background: var(--bg); }
+  button, input, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; padding: 6px 11px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); }
+  button:hover { background: var(--hover); } button:disabled { opacity: .5; cursor: default; }
+  input, textarea { padding: 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
+  input::placeholder, textarea::placeholder { color: var(--muted); }
+  :focus-visible { outline: 2px solid var(--selected-text); outline-offset: 2px; }
+  textarea { width: 100%; resize: vertical; }
+  .layout { display: grid; grid-template-columns: 285px minmax(0,1fr); min-height: 100vh; }
+  aside { border-right: 1px solid var(--divider); padding: 18px 12px; height: 100vh; position: sticky; top: 0; display: flex; flex-direction: column; gap: 12px; }
+  h1 { font-size: 18px; margin: 0; } h2 { font-size: 15px; margin: 0; overflow-wrap: anywhere; }
+  #search { width: 100%; } #clips { overflow-y: auto; flex: 1; }
+  .clip { display: block; width: 100%; text-align: left; border: 0; padding: 8px; border-radius: 3px; overflow-wrap: anywhere; font-size: 12px; }
+  .clip.active { background: var(--selected-bg); color: var(--selected-text); }
+  .muted { color: var(--muted); font-size: 12px; }
+  main { padding: 22px; min-width: 0; } header { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  #title { flex: 1; } .columns { display: grid; grid-template-columns: minmax(0,1.15fr) minmax(280px,1fr); gap: 22px; }
+  .player { position: sticky; top: 20px; align-self: start; } video { width: 100%; background: #151515; border-radius: 5px; }
+  label.field { display: block; font-weight: 600; margin-bottom: 5px; } .fieldgroup { margin-bottom: 18px; }
+  #labels { width: 100%; } .event { border-top: 1px solid var(--divider); padding: 13px 0; }
+  .times { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; } .times input { width: 76px; }
+  .event-label { width: 100%; margin-bottom: 7px; } .remove { margin-left: auto; color: var(--muted); }
+  #save { background: var(--accent); color: var(--on-accent); border-color: var(--accent); } #status.error { color: var(--error); }
+  [hidden] { display: none !important; }
+  @media(max-width:1000px) { .columns { grid-template-columns: 1fr; } .player { position: static; } }
+  @media(max-width:600px) { .layout { grid-template-columns: 1fr; } aside { position: static; height: 240px; border-bottom: 1px solid var(--divider); } main { padding: 14px; } }
+</style>
+<div class="layout">
+  <aside>
+    <h1>Motion label review</h1>
+    <button id="theme-toggle" type="button" aria-label="Toggle dark mode" aria-pressed="false">Dark mode</button>
+    <input id="search" type="search" placeholder="Search clips…" aria-label="Search clips">
+    <label><input id="unreviewed" type="checkbox"> Unreviewed only</label>
+    <label><input id="reviewed-only" type="checkbox"> Reviewed only</label>
+    <div id="count" class="muted"></div>
+    <nav id="clips" aria-label="Clips"></nav>
+  </aside>
+  <main>
+    <header>
+      <button id="previous">← Previous</button><button id="next">Next →</button>
+      <h2 id="title">Loading clips…</h2>
+      <button id="save" disabled>Save</button>
+    </header>
+    <div id="content" class="columns" hidden>
+      <section class="player">
+        <video id="video" controls preload="metadata"></video>
+        <p id="source" class="muted"></p>
+        <p class="muted">Times below are relative to this clip. Click an event’s play button to seek.</p>
+        <p id="status" role="status" class="muted">Edits save when you click Save or switch clips.</p>
+      </section>
+      <section id="editor" aria-label="Caption editor">
+        <div class="fieldgroup"><label class="field" for="summary">Summary</label><textarea id="summary" rows="5"></textarea></div>
+        <div class="fieldgroup"><label class="field" for="labels">Labels <span class="muted">(comma separated)</span></label><input id="labels"></div>
+        <div class="fieldgroup"><label><input id="reviewed" type="checkbox"> Reviewed</label><p id="review-reasons" class="muted"></p></div>
+        <h2>Events</h2><div id="events"></div><button id="add-event">+ Add event</button>
+      </section>
+    </div>
+  </main>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+applyTheme(document.documentElement.dataset.theme);
+$('theme-toggle').onclick = () => {
+  selectedTheme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  applyTheme(selectedTheme);
+  try { localStorage.setItem('motion-review-theme', selectedTheme); } catch {}
+};
+let clips = [], current = null, dirty = false, busy = false, revision = 0, pendingSave = null;
+function status(text, error=false) { $('status').textContent=text; $('status').classList.toggle('error',error); }
+function changed() { revision++; dirty=true; $('save').disabled=false; status('Unsaved edits — save or switch clips to save.'); }
+async function api(path, options) {
+  const response=await fetch(path, {cache:'no-store', ...options});
+  const value=await response.json();
+  if (!response.ok) throw new Error(value.error || 'Request failed');
+  return value;
+}
+function filtered() {
+  const query=$('search').value.toLowerCase();
+  return clips.filter(c=>c.id.toLowerCase().includes(query)
+    && (!$('unreviewed').checked || !c.reviewed)
+    && (!$('reviewed-only').checked || c.reviewed));
+}
+function renderList() {
+  const list=filtered(); $('clips').replaceChildren();
+  $('count').textContent=`${clips.filter(c=>c.reviewed).length} / ${clips.length} reviewed · ${list.length} shown`;
+  for (const clip of list) {
+    const button=document.createElement('button'); button.className='clip';
+    button.classList.toggle('active',clip.id===current?.id);
+    button.textContent=(clip.reviewed ? '✓ ' : '')+clip.id;
+    button.onclick=()=>select(clip.id); $('clips').append(button);
+  }
+  const index=list.findIndex(c=>c.id===current?.id);
+  $('previous').disabled=!current || index<=0;
+  $('next').disabled=!current || list.length===0 || index===list.length-1;
+}
+function addEvent(event={start_s:0,end_s:1,label:'',description:''}) {
+  const row=document.createElement('div'); row.className='event';
+  row.innerHTML='<div class="times"><button class="seek" title="Play from event start">▶</button><input class="start" type="number" min="0" step="0.02" aria-label="Event start seconds"><span>–</span><input class="end" type="number" min="0" step="0.02" aria-label="Event end seconds"><span class="muted">s</span><button class="remove" title="Delete event">×</button></div><input class="event-label" placeholder="Event label" aria-label="Event label"><textarea class="description" rows="3" placeholder="Description" aria-label="Event description"></textarea>';
+  row.querySelector('.start').value=event.start_s;
+  row.querySelector('.end').value=event.end_s;
+  row.querySelector('.event-label').value=event.label;
+  row.querySelector('.description').value=event.description;
+  row.querySelector('.seek').onclick=()=>{
+    $('video').currentTime=Number(row.querySelector('.start').value);
+    $('video').play().catch(error=>status(error.message,true));
+  };
+  row.querySelector('.remove').onclick=()=>{row.remove();changed();};
+  $('events').append(row);
+}
+function save() {
+  if (pendingSave) return pendingSave;
+  pendingSave=saveChanges().finally(()=>{pendingSave=null;});
+  return pendingSave;
+}
+async function saveChanges() {
+  if (!current || !dirty) return true;
+  const savedRevision=revision;
+  const events=[...document.querySelectorAll('.event')].map(row=>({
+    start_s:Number(row.querySelector('.start').value),end_s:Number(row.querySelector('.end').value),
+    label:row.querySelector('.event-label').value,description:row.querySelector('.description').value
+  }));
+  const payload={summary:$('summary').value,labels:$('labels').value.split(',').map(x=>x.trim()).filter(Boolean),
+    reviewed:$('reviewed').checked,events};
+  try {
+    await api('/api/clip/'+encodeURIComponent(current.id),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    current={...current,...payload}; clips.find(c=>c.id===current.id).reviewed=current.reviewed;
+    dirty=revision!==savedRevision; $('save').disabled=!dirty;
+    status(dirty ? 'Newer edits are unsaved — save again before switching clips.' : 'Saved to the separate review file.');
+    renderList(); return !dirty;
+  } catch(error) { status(error.message,true); return false; }
+}
+async function select(id) {
+  if (busy || id===current?.id) return;
+  busy=true;
+  try {
+    if (!(await save())) return;
+    const clip=await api('/api/clip/'+encodeURIComponent(id)); current=clip;
+    $('title').textContent=id; $('summary').value=clip.summary;
+    $('labels').value=clip.labels.join(', '); $('reviewed').checked=clip.reviewed;
+    $('events').replaceChildren(); clip.events.forEach(addEvent);
+    $('video').src='/video/'+encodeURIComponent(id);
+    const range=clip.source_interval_s;
+    $('source').textContent=range ? `Parent motion interval: ${range[0]}–${range[1]} s` : 'Original motion video';
+    $('review-reasons').textContent=(clip.review_reasons || []).join(' · ');
+    $('content').hidden=false; $('save').disabled=true; dirty=false;
+    status(clip.updated_at ? 'Previously reviewed edits loaded.' : 'Generated captions loaded. Edit while watching.');
+    renderList();
+  } catch(error) { $('title').textContent='Could not load clip'; status(error.message,true); }
+  finally { busy=false; }
+}
+function move(offset) {
+  const list=filtered(); const index=list.findIndex(c=>c.id===current?.id);
+  const target=index<0 ? list[0] : list[index+offset]; if(target) select(target.id);
+}
+$('search').oninput=renderList;
+$('unreviewed').onchange=()=>{
+  if ($('unreviewed').checked) $('reviewed-only').checked=false;
+  renderList();
+};
+$('reviewed-only').onchange=()=>{
+  if ($('reviewed-only').checked) $('unreviewed').checked=false;
+  renderList();
+};
+$('previous').onclick=()=>move(-1); $('next').onclick=()=>move(1);
+$('save').onclick=save; $('editor').oninput=changed;
+$('add-event').onclick=()=>{addEvent();changed();};
+window.addEventListener('beforeunload',event=>{if(dirty){event.preventDefault();event.returnValue='';}});
+document.addEventListener('keydown',event=>{if((event.ctrlKey || event.metaKey)&&event.key==='s'){event.preventDefault();save();}});
+api('/api/clips').then(async value=>{clips=value;renderList();if(clips.length) await select(clips[0].id);})
+  .catch(error=>{$('title').textContent=error.message;});
+</script>
+</html>
