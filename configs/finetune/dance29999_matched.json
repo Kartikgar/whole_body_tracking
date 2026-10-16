@@ -1,0 +1,38 @@
+{
+  "base_checkpoint": "artifacts/checkpoints/lafan_dance1_subject1/model_29999.pt",
+  "motion_file": "data/LAFAN1_Retargeting_Dataset/g1/PgS2R-mini/dance1_subject1__100.00s-120.00s.npz",
+  "ensemble_checkpoints": [
+    "logs/rsl_rl/2026.10.14/g1_delta_wrench_policies/2026-10-09_17-27-13_lafan_jumps1_subject1__200.00s-220.00s_traj100_plus_dance1_subject1__100.00s-120.00s_traj40_rsf_w-1.0_hzn10.0_btstrap000_sd0/model_4999.pt",
+    "logs/rsl_rl/2026.10.14/g1_delta_wrench_policies/2026-10-09_17-27-14_lafan_jumps1_subject1__200.00s-220.00s_traj100_plus_dance1_subject1__100.00s-120.00s_traj40_rsf_w-1.0_hzn10.0_btstrap001_sd1/model_4999.pt",
+    "logs/rsl_rl/2026.10.14/g1_delta_wrench_policies/2026-10-09_17-27-14_lafan_jumps1_subject1__200.00s-220.00s_traj100_plus_dance1_subject1__100.00s-120.00s_traj40_rsf_w-1.0_hzn10.0_btstrap002_sd2/model_4999.pt"
+  ],
+  "isaac_python": "/home/asinha389/miniconda3/envs/sim2real/bin/python",
+  "genesis_python": "/home/asinha389/miniconda3/envs/genesis/bin/python",
+  "lambdas": [
+    8
+  ],
+  "iterations": 200,
+  "export_iterations": [
+    49,
+    74,
+    99,
+    149,
+    199
+  ],
+  "num_envs": 4096,
+  "train_seed": 0,
+  "eval_seeds": [
+    0
+  ],
+  "genesis_num_envs": 100,
+  "finetune_domain_randomization": true,
+  "genesis_domain_randomization": false,
+  "include_controls": false,
+  "genesis_add_noise": false,
+  "genesis_randomize_startup_qpos": true,
+  "injection_probability": 0.5,
+  "include_original_base": false,
+  "genesis_endpoint_height_error_m": 1.0,
+  "preserve_frozen_policy_rng": true,
+  "genesis_initial_state_npz": "logs/sim2sim_eval/2026.10.21/dance29999_baseline_endpoint1m_20261016/paired_initial_states.npz"
+}

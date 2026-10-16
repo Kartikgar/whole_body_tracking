@@ -75,7 +75,11 @@ class MotionOnPolicyRunner(OnPolicyRunner):
         if self._wrench_metadata() is not None and self.delta_policy_clip_actions is not None:
             raise ValueError("Pelvis wrench uses env.actions.joint_pos.action_clip; leave delta_policy_clip_actions unset")
         if self.delta_policy_checkpoints:
-            self._load_delta_policies(self.delta_policy_checkpoints)
+            preserve_rng = bool(self.cfg.get("preserve_frozen_policy_rng", False))
+            with torch.random.fork_rng(
+                devices=list(range(torch.cuda.device_count())) if preserve_rng else [], enabled=preserve_rng
+            ):
+                self._load_delta_policies(self.delta_policy_checkpoints)
         elif self.delta_policy_require:
             raise ValueError("`delta_policy_require=True` but no `delta_policy_checkpoints` were provided.")
 
@@ -117,7 +121,13 @@ class MotionOnPolicyRunner(OnPolicyRunner):
 
     def load(self, path: str, load_optimizer: bool = True):
         self._validate_wrench_checkpoint(torch.load(path, map_location="cpu", weights_only=False))
-        return super().load(path, load_optimizer=load_optimizer)
+        infos = super().load(path, load_optimizer=load_optimizer)
+        if load_optimizer:
+            # RSL-RL restores Adam's LR but leaves the adaptive scheduler at the
+            # configured initial LR. Its first minibatch would overwrite Adam's
+            # restored rate, causing a large policy update when resuming.
+            self.alg.learning_rate = self.alg.optimizer.param_groups[0]["lr"]
+        return infos
 
     @staticmethod
     def _normalize_delta_policy_checkpoints(checkpoints) -> list[str]:

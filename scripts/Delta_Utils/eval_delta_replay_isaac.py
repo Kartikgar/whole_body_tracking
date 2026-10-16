@@ -13,7 +13,7 @@ import sys
 from datetime import datetime
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 STATE_KEYS = ('joint_pos', 'joint_vel', 'body_pos_w', 'body_quat_w', 'body_lin_vel_w', 'body_ang_vel_w')
 
 
@@ -103,6 +103,70 @@ def name_indices(source, target):
     return [source.index(name) for name in target]
 
 
+def select_trajectory_windows(windows, limit):
+    """Spread a bounded screening budget over each trajectory's eligible grid."""
+    if limit is None:
+        return windows
+    selected = []
+    for trajectory in sorted({w['trajectory'] for w in windows}):
+        group = [w for w in windows if w['trajectory'] == trajectory]
+        selected.extend(group[i] for i in np.linspace(0, len(group)-1, min(limit, len(group)), dtype=int))
+    return selected
+
+
+def gate_conditions(windows, scales, include_zero):
+    conditions = ([dict(condition='zero_delta', zero_delta=True, gate_scale=0.)] if include_zero else [])
+    conditions += [dict(condition=f'lambda_{scale:g}', zero_delta=False, gate_scale=scale) for scale in scales]
+    # Interleave conditions to keep corresponding starts in the same simulation batch.
+    return [w | condition for w in windows for condition in conditions]
+
+
+def gated_ensemble_action(predictions, scales, zero_mask):
+    """Match MyOnPolicyRunner: raw population RMS std, exp gate, then action clipping downstream."""
+    import torch
+    uncertainty = predictions.std(dim=0, correction=0).square().mean(dim=-1).sqrt()
+    gate = torch.exp(-scales * uncertainty)
+    gate = torch.where(zero_mask, torch.zeros_like(gate), gate)
+    delta = predictions.mean(dim=0) * gate.unsqueeze(-1)
+    return delta, gate, uncertainty
+
+
+def measurement_schedule(fps, steps, interval_s):
+    """Nearest control frames, rounding half-frame ties forward; include reset and endpoint."""
+    if not np.isfinite(interval_s) or interval_s < 1 / fps:
+        raise ValueError('Measurement interval must be finite and at least one control step')
+    times = np.arange(0, steps / fps + 1e-9, interval_s).tolist()
+    if not np.isclose(times[-1], steps / fps):
+        times.append(steps / fps)
+    return [dict(step=int(np.floor(t * fps + .5)), requested_time_s=float(t),
+                 elapsed_s=int(np.floor(t * fps + .5)) / fps) for t in times]
+
+
+def measurement(actual, reference, root, point):
+    q, r = actual['body_quat_w'][root], reference['body_quat_w'][root]
+    cosine = abs(float(np.dot(q, r))) / max(float(np.linalg.norm(q) * np.linalg.norm(r)), 1e-12)
+    return point | errors(actual, reference, root) | dict(
+        root_height_m=float(actual['body_pos_w'][root, 2]),
+        reference_root_height_m=float(reference['body_pos_w'][root, 2]),
+        root_height_error_m=float(abs(actual['body_pos_w'][root, 2] - reference['body_pos_w'][root, 2])),
+        root_orientation_error_rad=float(2 * np.arccos(np.clip(cosine, 0, 1))))
+
+
+def ensemble_statistics(outputs, force_scale, torque_scale, action_clip):
+    """Population component standard deviations on identical raw observations."""
+    raw = np.asarray(outputs)
+    std = raw.std(axis=0)
+    clipped = np.clip(raw, -action_clip, action_clip)
+    physical_std = clipped.std(axis=0)
+    return [dict(normalized_disagreement=float(np.sqrt(np.mean(std[i] ** 2))),
+                 clipped_normalized_disagreement=float(np.sqrt(np.mean(physical_std[i] ** 2))),
+                 force_disagreement_n=float(force_scale * np.sqrt(np.mean(physical_std[i, :3] ** 2))),
+                 torque_disagreement_nm=float(torque_scale * np.sqrt(np.mean(physical_std[i, 3:] ** 2))),
+                 saturation_fraction=float(np.mean(np.abs(raw[:, i]) >= action_clip)),
+                 member_raw_outputs=raw[:, i].tolist(), member_clipped_outputs=clipped[:, i].tolist())
+            for i in range(raw.shape[1])]
+
+
 def errors(actual, target, root_idx=0):
     def rmse(k):
         return float(np.sqrt(np.mean((actual[k] - target[k]) ** 2)))
@@ -153,6 +217,19 @@ def worker(args):
             cfg = pickle.load(f)
         with (checkpoint.parent / 'params/agent.pkl').open('rb') as f:
             agent = pickle.load(f)
+        def compatible_config(config):
+            values = {key: getattr(config, key).to_dict() for key in ('sim', 'actions', 'observations')}
+            values['robot'] = config.scene.robot.to_dict()
+            values['robot']['spawn'].pop('usd_dir', None)
+            return json.dumps(values, sort_keys=True, default=str)
+        original_contract = compatible_config(cfg)
+        member_agents = []
+        for member in args.ensemble_checkpoints:
+            with (member.parent / 'params/env.pkl').open('rb') as f:
+                if compatible_config(pickle.load(f)) != original_contract:
+                    raise ValueError(f'Ensemble physics/observation/action contract mismatch: {member}')
+            with (member.parent / 'params/agent.pkl').open('rb') as f:
+                member_agents.append(pickle.load(f))
         from whole_body_tracking.tasks.tracking.mdp.pelvis_wrench import DeltaPelvisWrenchActionCfg
         if not isinstance(cfg.actions.joint_pos, DeltaPelvisWrenchActionCfg):
             raise ValueError('Checkpoint must use the pelvis-wrench open-loop environment')
@@ -204,6 +281,15 @@ def worker(args):
         if getattr(runner.alg.policy, 'is_recurrent', False):
             raise ValueError('Recurrent delta policies require a recorded-history protocol and are not supported')
         policy = runner.get_inference_policy(device=args.device)
+        member_runners, member_policies = [], []
+        for member, settings in zip(args.ensemble_checkpoints, member_agents):
+            settings.device = args.device
+            loaded = OnPolicyRunner(wrapped, settings.to_dict(), log_dir=None, device=args.device)
+            loaded.load(str(member))
+            if getattr(loaded.alg.policy, 'is_recurrent', False):
+                raise ValueError('Recurrent ensemble members are not supported')
+            member_runners.append(loaded)
+            member_policies.append(loaded.get_inference_policy(device=args.device))
         term = env.command_manager.get_term('motion')
         robot = env.scene['robot']
         action = env.action_manager.get_term('joint_pos')
@@ -253,6 +339,11 @@ def worker(args):
             env.action_manager.reset(env_ids=torch.arange(args.num_envs, device=args.device))
             env.observation_manager.reset(env_ids=torch.arange(args.num_envs, device=args.device))
             n = len(batch)
+            gate_scales = torch.zeros(args.num_envs, device=args.device)
+            zero_mask = torch.zeros(args.num_envs, device=args.device, dtype=torch.bool)
+            gate_scales[:n] = torch.tensor([w.get('gate_scale', 0.) for w in batch], device=args.device)
+            zero_mask[:n] = torch.tensor([w.get('zero_delta', False) for w in batch], device=args.device)
+            gate_history = [[] for _ in batch]
             ids = torch.arange(n, device=args.device)
             traj = np.array([w['trajectory'] for w in batch]); starts = np.array([w['start'] for w in batch])
             term.trajectory_ids[ids] = torch.as_tensor(traj, device=args.device)
@@ -271,10 +362,42 @@ def worker(args):
                    and e['body_pos_error_m']<1e-3 and e['body_orientation_error_rad']<1e-3
                    and e['body_lin_vel_rmse_m_s']<1e-3 and e['body_ang_vel_rmse_rad_s']<1e-3 for e in reset_errors]
             per_window=[[] for _ in batch];forces=[[] for _ in batch];saved=[[] for _ in batch]
+            schedules = [measurement_schedule(fps, w['steps'], args.measurement_interval_s)
+                         if args.measurement_interval_s is not None else [] for w in batch]
+            curves = [[measurement(state(i), target(traj[i], starts[i]), root, schedule[0])]
+                      if schedule and valid[i] else [] for i, schedule in enumerate(schedules)]
+            sample_points = [{point['step']: point for point in schedule[1:]} for schedule in schedules]
+            def probe_ensemble():
+                obs = env.observation_manager.compute_group('policy')
+                with torch.inference_mode():
+                    predictions = torch.stack([member(obs) for member in member_policies])
+                return predictions
+            disagreement_curves = [[] for _ in batch]
+            def record_disagreement(predictions, current_step):
+                diagnostics = ensemble_statistics(predictions[:, :n].detach().cpu().numpy(),
+                                                   cfg.actions.joint_pos.force_scale,
+                                                   cfg.actions.joint_pos.torque_scale,
+                                                   cfg.actions.joint_pos.action_clip)
+                for i in range(n):
+                    point = next((p for p in schedules[i] if p['step'] == current_step), None)
+                    if valid[i] and point is not None and np.isfinite(predictions[:, i].cpu().numpy()).all():
+                        uncertainty = diagnostics[i]['normalized_disagreement']
+                        gate = 0. if batch[i].get('zero_delta', False) else float(np.exp(-batch[i].get('gate_scale', 0.) * uncertainty))
+                        disagreement_curves[i].append(point | diagnostics[i] | dict(gate=gate))
+            if member_policies:
+                record_disagreement(probe_ensemble(), 0)
             for step in range(max(w['steps'] for w in batch)):
                 obs = env.observation_manager.compute_group('policy')
                 with torch.inference_mode():
-                    delta = torch.zeros((args.num_envs,6),device=args.device) if args.zero_delta else policy(obs)
+                    if member_policies:
+                        predictions = torch.stack([member(obs) for member in member_policies])
+                        delta, gate, uncertainty = gated_ensemble_action(predictions, gate_scales, zero_mask)
+                        delta = torch.where(torch.isfinite(predictions).all(dim=0), delta, torch.nan)
+                        gate_values = gate[:n].cpu().numpy()
+                        for i in range(n):
+                            gate_history[i].append(float(gate_values[i]))
+                    else:
+                        delta = torch.zeros((args.num_envs,6),device=args.device) if args.zero_delta else policy(obs)
                 finite_delta = torch.isfinite(delta).all(dim=-1)
                 for i in range(n):
                     if not bool(finite_delta[i]):
@@ -289,14 +412,25 @@ def worker(args):
                     actual=state(i)
                     if not all(np.isfinite(a).all() for a in actual.values()): valid[i]=False;continue
                     per_window[i].append(errors(actual,target(traj[i],starts[i]+step+1),root))
+                    if step + 1 in sample_points[i]:
+                        curves[i].append(measurement(actual, target(traj[i], starts[i]+step+1),
+                                                     root, sample_points[i][step+1]))
                     forces[i].append(action._wrench[i].detach().cpu().numpy().copy())
                     if args.record_rollouts:
                         saved[i].append(actual|{'actions':data['actions'][traj[i],starts[i]+step].copy(),
                                                'wrench':forces[i][-1]})
                 term.time_steps += 1
+                if member_policies and any(step + 1 in points for points in sample_points):
+                    record_disagreement(probe_ensemble(), step + 1)
             for i,w in enumerate(batch):
                 good=valid[i] and len(per_window[i])==w['steps']
                 row=w|dict(status='complete' if good else 'reset_or_numerical_failure', reset_errors=reset_errors[i])
+                if args.measurement_interval_s is not None:
+                    row['error_curve'] = curves[i]
+                    row['observed_steps'] = len(per_window[i])
+                if member_policies:
+                    row['disagreement_curve'] = disagreement_curves[i]
+                    row['gate_mean'] = float(np.mean(gate_history[i]))
                 if good:
                     row.update({'endpoint_'+k:v for k,v in per_window[i][-1].items()})
                     row.update({'mean_'+k:float(np.mean([e[k] for e in per_window[i]])) for k in per_window[i][0]})
@@ -320,6 +454,9 @@ def worker(args):
                     summary=summarize(rows),
                     per_trajectory={str(i):summarize([r for r in rows if r['trajectory']==i])
                                     for i in sorted(set(r['trajectory'] for r in rows))})
+        if args.ensemble_gate_scales is not None:
+            report['per_condition'] = {key:summarize([r for r in rows if r['condition']==key])
+                                       for key in dict.fromkeys(r['condition'] for r in rows)}
         (out/'summary.json').write_text(json.dumps(report,indent=2))
     except BaseException:
         import traceback
@@ -341,6 +478,12 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--dataset', type=Path, required=True, help='Recorded state/action NPZ')
     p.add_argument('--checkpoint', type=Path, required=True, help='Delta checkpoint with params/env.pkl and agent.pkl')
+    p.add_argument('--ensemble_checkpoints', type=Path, nargs='+', default=[],
+                   help='All ensemble members; own normalizers and shared current observations')
+    p.add_argument('--ensemble_gate_scales', type=float, nargs='+',
+                   help='Evaluate each lambda independently; exp(-lambda * raw RMS std), then clip')
+    p.add_argument('--include_zero_baseline', action='store_true', help='Add matched zero-delta windows to a gate sweep')
+    p.add_argument('--windows_per_trajectory', type=int, help='Screening cap, spread over eligible starts per trajectory')
     p.add_argument('--num_envs', type=int, default=100)
     p.add_argument('--device', default='cuda:0')
     p.add_argument('--seed', type=int, default=0)
@@ -353,6 +496,8 @@ def main():
     p.add_argument('--trajectory_indices', type=int, nargs='+', help='Subset of recorded trajectories; default all')
     p.add_argument('--max_windows', type=int, help='Evenly subsample the schedule for a smoke test')
     p.add_argument('--record_rollouts', action='store_true')
+    p.add_argument('--measurement_interval_s', type=float,
+                   help='Save instantaneous error curves at nearest control frames, including reset')
     p.add_argument('--zero_delta', action='store_true', help='Replay with zero delta using the supplied checkpoint configuration')
     p.add_argument('--validate_only', action='store_true')
     p.add_argument('--timeout_s', type=float, default=3600)
@@ -364,7 +509,21 @@ def main():
     if args.num_envs < 1 or not np.isfinite(args.timeout_s) or args.timeout_s <= 0 or args.seed < 0 or args.max_windows is not None and args.max_windows < 1:
         p.error('Invalid limits or seed')
     args.checkpoint = args.checkpoint.resolve()
-    for file in (args.checkpoint, args.checkpoint.parent/'params/env.pkl', args.checkpoint.parent/'params/agent.pkl'):
+    args.ensemble_checkpoints = [path.resolve() for path in args.ensemble_checkpoints]
+    if args.windows_per_trajectory is not None and args.windows_per_trajectory < 1:
+        p.error('windows_per_trajectory must be positive')
+    if args.ensemble_gate_scales is not None:
+        scales = args.ensemble_gate_scales
+        if not args.ensemble_checkpoints or len(set(scales)) != len(scales) or any(not np.isfinite(v) or v < 0 for v in scales):
+            p.error('Gate scales require an ensemble and distinct nonnegative finite values')
+    elif args.include_zero_baseline:
+        p.error('include_zero_baseline requires ensemble_gate_scales')
+    if args.ensemble_checkpoints and (len(set(args.ensemble_checkpoints)) < 2
+                                    or len(set(args.ensemble_checkpoints)) != len(args.ensemble_checkpoints)
+                                    or args.zero_delta or args.measurement_interval_s is None):
+        p.error('Ensemble requires at least two distinct members, interval sampling, and nonzero-delta mode')
+    for file in [file for ck in [args.checkpoint, *args.ensemble_checkpoints]
+                 for file in (ck, ck.parent/'params/env.pkl', ck.parent/'params/agent.pkl')]:
         if not file.is_file():
             p.error(f'Missing checkpoint/config: {file}')
     args.dataset = args.dataset.resolve()
@@ -375,10 +534,18 @@ def main():
                                args.trajectory_indices, args.start_frames)
     except ValueError as exc:
         p.error(str(exc))
+    windows = select_trajectory_windows(windows, args.windows_per_trajectory)
     if args.max_windows and len(windows) > args.max_windows:
         windows = [windows[i] for i in np.linspace(0, len(windows)-1, args.max_windows, dtype=int)]
+    if args.ensemble_gate_scales is not None:
+        windows = gate_conditions(windows, args.ensemble_gate_scales, args.include_zero_baseline)
     if not windows:
         p.error('No eligible windows: replay must have an observed successor within valid_lengths')
+    if args.measurement_interval_s is not None:
+        try:
+            measurement_schedule(float(data['fps'].ravel()[0]), windows[0]['steps'], args.measurement_interval_s)
+        except ValueError as exc:
+            p.error(str(exc))
     if args.validate_only:
         print(json.dumps(dict(windows=len(windows), checkpoint=str(args.checkpoint),
                               dataset=str(args.dataset), replay_steps=windows[0]['steps']), indent=2))
@@ -392,6 +559,16 @@ def main():
                     num_envs=args.num_envs, device=args.device, stride_s=args.stride_s,
                     replay_steps=windows[0]['steps'], replay_length_s=windows[0]['horizon_s'],
                     zero_delta=args.zero_delta, record_rollouts=args.record_rollouts, status='running')
+    manifest['measurement_interval_s'] = args.measurement_interval_s
+    manifest['ensemble_gate_scales'] = args.ensemble_gate_scales
+    manifest['include_zero_baseline'] = args.include_zero_baseline
+    manifest['windows_per_trajectory'] = args.windows_per_trajectory
+    manifest['ensemble_members'] = [dict(checkpoint=str(path), sha256=sha256(path),
+                                         config_sha256={key:sha256(path.parent/'params'/key) for key in ('env.pkl','agent.pkl')})
+                                   for path in args.ensemble_checkpoints]
+    manifest['ensemble_protocol'] = ('Shared current observations; own member normalizers; independent state evolution per condition; '
+                                     'mean raw outputs * exp(-lambda * population RMS std), then action clipping; '
+                                     'lambda=0 is ungated; explicit zero baseline applies no wrench')
     (out/'manifest.json').write_text(json.dumps(manifest, indent=2))
     command = [sys.executable, str(Path(__file__).resolve()), '--worker', '--dataset', str(args.dataset),
                '--output_dir', str(out), '--checkpoint', str(args.checkpoint), '--num_envs', str(args.num_envs),
@@ -400,6 +577,12 @@ def main():
         command.append('--zero_delta')
     if args.record_rollouts:
         command.append('--record_rollouts')
+    if args.measurement_interval_s is not None:
+        command.extend(['--measurement_interval_s', str(args.measurement_interval_s)])
+    if args.ensemble_checkpoints:
+        command.extend(['--ensemble_checkpoints', *map(str, args.ensemble_checkpoints)])
+    if args.ensemble_gate_scales is not None:
+        command.extend(['--ensemble_gate_scales', *map(str, args.ensemble_gate_scales)])
     environment = os.environ.copy()
     environment['PYTHONUNBUFFERED'] = '1'
     environment['PYTHONPATH'] = str(ROOT/'source/whole_body_tracking') + os.pathsep + environment.get('PYTHONPATH', '')

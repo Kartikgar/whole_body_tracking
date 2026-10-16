@@ -1,0 +1,38 @@
+# Why does ensemble-assisted finetuning underperform no-delta finetuning?
+
+Status: **open research question**, evidence reviewed 2026-10-16. The companion [experiment ledger](ensemble_transfer_experiment_ledger.md) records configurations, numbers and artifact locations. This note separates observed results from possible mechanisms.
+
+## Research hypothesis
+
+Genesis trajectories expose an Isaac–Genesis dynamics mismatch. A learned pelvis-wrench delta, trained on Genesis state/action transitions, could make Isaac rollouts more target-like. Finetuning a dance tracking policy in that corrected source simulation might then improve its **unassisted** deployment in Genesis beyond specialization from no-delta finetuning alone. A bootstrap ensemble and uncertainty gate were meant to suppress corrections in poorly supported states; episode-level injection probability was another way to limit exposure.
+
+The question is whether short-horizon transition correction transfers to an actor trained by closed-loop PPO. The deployed ONNX contains the finetuned **base actor and motion reference**, not the delta ensemble. Any gain must persist after the actor is removed from the corrected training dynamics and run in Genesis.
+
+## What the evidence says
+
+1. **Short replay shows useful local corrections, with an important model distinction.** On the dance validation archive, a *single* Jump100+Dance40 delta reduced 2-second endpoint joint RMSE from 0.3592 to 0.3046 rad and world body-position error from 1.4263 to 0.8466 m relative to zero delta. This used 1,160 windows from 78 sufficiently long trajectories and fixed recorded base actions. It is evidence for the single delta, **not a direct 2-second test of the three-member gated ensemble**. [Replay report](../logs/delta_eval/2026.10.14/dance_validation_2s/comparison/README.md).
+2. **The gated ensemble also has short-replay evidence.** On a separate 1-second dance validation screen, the three-member ensemble with λ=2 reduced endpoint world body-position error from 0.4278 to 0.2958 m and joint RMSE from 0.2153 to 0.1959 rad; λ=4 also improved both. This used 277 windows across all 100 trajectories. These short windows bypass ordinary resets and use recorded actions. [Gate validation](../logs/delta_eval/2026.10.21/ensemble_gate_validation_dance_1s_20261015/README.md).
+3. **The 5-second ensemble replay has a narrower claim.** The ungated ensemble improved several metrics relative to the original single delta, but zero delta retained lower final world body-position error. Short-horizon improvement does not establish a sustained 20-second advantage. [Five-second report](../logs/delta_eval/2026.10.14/dance_validation_jump100_dance40_single_vs_ensemble_5s/README.md).
+4. **Closed-loop Genesis performance currently favors no delta.** From the original `model_29999.pt`, standard no-delta finetuning reached 98% full-clip completion / 98.256% clip survival after 150 PPO iterations with seed 0; a second training seed reached 88% / 90.682% at the same checkpoint. The original actor reached 24% / 32.924%. Across λ=8 or 14 and injection probabilities 1.0 or 0.5, the ensemble conditions reached **at most 10% completion** at evaluated 50–200 iteration checkpoints. See the [ledger](ensemble_transfer_experiment_ledger.md) for each run. Completion is the primary outcome; observed tracking errors are censored by early failures and cannot be compared without survival context.
+5. **Changing gate strength or injection frequency has not rescued this setup.** λ=14 with probability 0.5 modestly improved some late checkpoints over λ=8 with probability 0.5, but peaked at 8% completion and 16.142% survival. λ=14 with probability 1.0 peaked at 4% and 12.26%. These are descriptive comparisons from one ensemble training seed, not an estimate of the isolated causal effect of λ or probability.
+
+## Why these observations can coexist
+
+Replay starts from recorded Genesis states, holds the dataset's base-action sequence fixed, and measures one or two seconds of correction. PPO changes the actor's actions and the state distribution throughout training. A correction that improves those recorded transitions can still redirect PPO toward behavior that depends on the corrected Isaac dynamics and fails when the correction is absent in Genesis. This is a **candidate explanation**, not yet a demonstrated cause. Likewise, gate uncertainty may fail to identify harmful corrections on-policy, or the correction may be inaccurate over longer horizons; neither mechanism has been isolated yet.
+
+The ensemble runs use source domain randomization and policy observation noise, while matched Genesis evaluations disable both and retain randomized startup joints. These are intended settings, so the train/eval difference itself should not be treated as a discovered bug. Most failed ensemble rollouts are labeled `anchor_pos_z`, which identifies the violated termination check but does not establish what caused the loss of height. The no-delta control is nonmonotonic too: seed 0 falls from 98% completion at 150 iterations to 44% at 200, so checkpoint selection matters.
+
+## Validity checks already completed
+
+An earlier zero-injection control appeared to perform poorly because constructing frozen ensemble networks consumed Torch RNG and changed subsequent PPO samples. The [control audit](../logs/ensemble_finetune/2026.10.21/dance29999_base_env_no_delta_200_20261016/CONTROL_AUDIT.md) repeated the full 200-iteration zero-injection path with frozen-model loading inside an RNG fork. It matched the standard no-delta path bit for bit at 50, 100, 150 and 200 iterations, including policy, critic, optimizer and normalizer states. The later ensemble runs use RNG-preserving loading. Therefore the earlier poor zero-injection run is **not** the comparison control used here.
+
+The saved summaries verify the same Genesis initial-state archive for the baseline and evaluated checkpoints and matching deployment metadata. The λ=14 driver plans pin the same base checkpoint, motion, ensemble members and archived initial states as the λ=8 experiments. Only one ensemble training seed and one matched Genesis evaluation archive have been evaluated for this particular comparison; this limits generalization.
+
+## Next tests that would distinguish mechanisms
+
+1. **Measure corrections on-policy before and during PPO.** On identical Isaac states from no-delta and ensemble training, record member outputs, gate, actual wrench and next-state error against matched Genesis transitions. Stratify by time to `anchor_pos_z` failure and state support. This tests whether the gate suppresses corrections where they become harmful.
+2. **Compare frozen actors with and without the ensemble in Isaac before training.** Use the original actor and identical initial states. A performance drop would locate a direct environment intervention problem; no drop would focus attention on the PPO adaptation path.
+3. **Evaluate matched finetuned actors in both simulators, with delta present and absent in Isaac.** This distinguishes poor policy optimization in source simulation from dependence on the injected wrench and from target-simulator transfer failure.
+4. **Repeat the promising control and at least one ensemble condition across training seeds.** Prefer a prespecified checkpoint rule (for example, best matched Genesis completion among 50, 75, 100, 150 and 200) and report both completion and survival. The current two-seed evidence is only for no delta.
+
+The next experiment should prioritize mechanism identification over adding more λ values: neither λ=8 nor 14, at either tested injection probability, produces a useful target-simulator policy under the present protocol.

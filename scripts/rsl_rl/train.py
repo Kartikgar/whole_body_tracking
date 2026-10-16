@@ -24,6 +24,12 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument("--output_dir", type=str, default=None, help="Explicit training run directory.")
+parser.add_argument("--save_after_iterations", type=int, nargs="+", default=None,
+                    help="Save at these zero-based finetuning PPO iterations, independent of resumed iteration numbers.")
+parser.add_argument("--require_dr", action="store_true", help="Fail unless source randomization events and policy noise are enabled.")
+parser.add_argument("--preserve_frozen_policy_rng", action="store_true",
+                    help="Preserve Torch RNG state while constructing frozen delta policies.")
 parser.add_argument(
     "--disable_dr",
     action="store_true",
@@ -309,6 +315,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _configure_delta_action_space(env_cfg)
     if args_cli.disable_dr:
         _disable_domain_randomization(env_cfg)
+    if args_cli.require_dr:
+        event_names = ("physics_material", "add_joint_default_pos", "base_com", "push_robot")
+        if args_cli.disable_dr or any(getattr(env_cfg.events, name, None) is None for name in event_names):
+            raise ValueError("Required source domain randomization events are disabled")
+        if not env_cfg.observations.policy.enable_corruption:
+            raise ValueError("Required source policy observation noise is disabled")
 
     # load motion file from local path or wandb registry
     registry_name = None
@@ -342,6 +354,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if agent_cfg.run_name:
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
+    if args_cli.output_dir:
+        log_dir = os.path.abspath(args_cli.output_dir)
+        if os.path.exists(log_dir):
+            raise FileExistsError(f"Training output already exists: {log_dir}")
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -365,6 +381,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = RslRlVecEnvWrapper(env)
 
     # create runner from rsl-rl
+    agent_cfg.preserve_frozen_policy_rng = args_cli.preserve_frozen_policy_rng
     runner = OnPolicyRunner(
         env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device, registry_name=registry_name
     )
@@ -418,6 +435,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dump_pickle(os.path.join(log_dir, "params", "agent.pkl"), agent_cfg)
 
     # run training
+    if args_cli.save_after_iterations:
+        import json
+        from pathlib import Path
+
+        ages = set(args_cli.save_after_iterations)
+        if min(ages) < 0 or max(ages) >= agent_cfg.max_iterations:
+            raise ValueError("save_after_iterations must be within [0, max_iterations)")
+        start_iteration = runner.current_learning_iteration
+        original_log = runner.log
+        checkpoint_records = []
+
+        def log_and_capture(locs, *args, **kwargs):
+            original_log(locs, *args, **kwargs)
+            age = int(locs["it"]) - start_iteration
+            if age in ages:
+                checkpoint = Path(log_dir) / f"model_finetune_iter_{age:04d}.pt"
+                runner.save(str(checkpoint))
+                checkpoint_records.append(dict(finetune_iteration=age, iteration=int(locs["it"]), path=str(checkpoint)))
+                manifest = dict(initial_iteration=start_iteration, requested_iterations=agent_cfg.max_iterations,
+                                domain_randomization_enabled=not args_cli.disable_dr,
+                                checkpoints=checkpoint_records)
+                manifest_path = Path(log_dir) / "update_checkpoints.json"
+                temporary = manifest_path.with_suffix(".tmp")
+                temporary.write_text(json.dumps(manifest, indent=2))
+                temporary.replace(manifest_path)
+
+        runner.log = log_and_capture
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
 
     # close the simulator
@@ -426,6 +470,5 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
 if __name__ == "__main__":
     # run the main function
-    main()  # pyright: ignore[reportCallIssue]
-    # close sim app
-    simulation_app.close()
+    from process_cleanup import run_and_close
+    run_and_close(main, simulation_app)

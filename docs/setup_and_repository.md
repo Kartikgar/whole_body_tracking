@@ -45,7 +45,7 @@ Robot assets must be available under the extension's assets directory. Preserve 
 - Rank/relevance: `scripts/rank_motions.py`, `scripts/find_motion_relevance.py`.
 - Segment export: `scripts/prepare_segment_artifacts.py`.
 - Target simulation: `scripts/eval_sim2sim_genesis.py`.
-- Delta replay: `scripts/Delta_Utils/eval_delta_replay_isaac.py`.
+- Delta replay: `scripts/Delta_Utils/eval_delta_replay_isaac.py`; interval-error plots: `scripts/Delta_Utils/plot_delta_error_growth.py`; shared-ensemble diagnostics: `scripts/Delta_Utils/plot_delta_ensemble_growth.py`.
 - Aggregate/plot replay: `scripts/Delta_Utils/compare_delta_replay_results.py`, `scripts/Delta_Utils/plot_delta_replay_comparison.py`.
 
 Use `--help` on lightweight launchers for complete options. Training and playback import Isaac and require its runtime even for some help paths. Historical filenames in old experiments do not necessarily match current script locations.

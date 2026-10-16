@@ -51,7 +51,7 @@ def _step_metrics(state: dict[str, torch.Tensor], reference: dict[str, torch.Ten
     return errors
 
 
-def _failure_masks(state, reference, anchor: int, endpoint_ids: list[int]):
+def _failure_masks(state, reference, anchor: int, endpoint_ids: list[int], endpoint_height_error_tolerance_m: float = 0.25):
     nonfinite = torch.zeros(state["joint_pos"].shape[0], dtype=torch.bool, device=state["joint_pos"].device)
     for value in state.values():
         nonfinite |= ~torch.isfinite(value.reshape(value.shape[0], -1)).all(dim=1)
@@ -63,14 +63,18 @@ def _failure_masks(state, reference, anchor: int, endpoint_ids: list[int]):
     endpoint_error = (
         state["body_pos_w"][:, endpoint_ids, 2] - reference["body_pos_w"][:, endpoint_ids, 2]
     ).abs().amax(dim=-1)
-    return (nonfinite, anchor_z > 0.25, ori_error > 0.8, endpoint_error > 0.25)
+    return (nonfinite, anchor_z > 0.25, ori_error > 0.8, endpoint_error > endpoint_height_error_tolerance_m)
 
 
 def run_checkpoint_batch_eval(
     *, env, policy, simulation_app, checkpoint: str, motion_file: str, motion_frames: int,
     seed: int, spawn_joint_noise_rad: float, output_json: str, output_npz: str,
     video_folder: str | None, capture_reference, capture_state, bootstrap, metadata,
+    before_step=None, fail_on_termination=True, experiment_metadata=None,
+    endpoint_height_error_tolerance_m: float = 0.25,
 ) -> None:
+    if not np.isfinite(endpoint_height_error_tolerance_m) or endpoint_height_error_tolerance_m <= 0:
+        raise ValueError("endpoint_height_error_tolerance_m must be finite and positive")
     base_env = env.unwrapped
     motion_term = base_env.command_manager.get_term("motion")
     if motion_term.motion.num_trajectories != 1 or int(motion_term.motion.trajectory_time_step_total[0]) != motion_frames:
@@ -104,6 +108,8 @@ def run_checkpoint_batch_eval(
     termination_reasons: list[str | None] = [None] * num_envs
     metric_sums: dict[str, np.ndarray] = {}
     metric_counts: dict[str, np.ndarray] = {}
+    curves = [[] for _ in range(num_envs)]
+    sample_steps = {int(np.floor(t * fps + .5)) for t in np.arange(.25, motion_frames / fps + 1e-9, .25)}
     previous_positions = None
     previous_reference_positions = None
     previous2_positions = None
@@ -140,6 +146,7 @@ def run_checkpoint_batch_eval(
                 with torch.inference_mode():
                     reference = capture_reference(base_env)
                     actions = policy(obs)
+                    diagnostics = before_step(actions) if before_step is not None else {}
                     if action_array is None:
                         action_array = np.lib.format.open_memmap(
                             Path(scratch) / "actions.npy", mode="w+", dtype=np.float32,
@@ -151,6 +158,12 @@ def run_checkpoint_batch_eval(
                     state = capture_state(base_env)
                     active = np.array([reason is None for reason in termination_reasons], dtype=bool)
                     state_np = _numpy_state(state)
+                    wrench_term = base_env.action_manager.get_term('joint_pos')
+                    if hasattr(wrench_term, '_wrench'):
+                        diagnostics = diagnostics | dict(
+                            force_n=torch.linalg.norm(wrench_term._wrench[:, :3], dim=-1),
+                            torque_nm=torch.linalg.norm(wrench_term._wrench[:, 3:], dim=-1))
+                    diagnostics_np = {key:value.detach().cpu().numpy() for key,value in diagnostics.items()}
                     for key, value in state_np.items():
                         arrays[key][active, step] = value[active]
                     action_np = actions.detach().to("cpu", dtype=torch.float32).numpy()
@@ -201,7 +214,7 @@ def run_checkpoint_batch_eval(
                     previous2_reference_positions, previous_reference_positions = (
                         previous_reference_positions, reference_positions.copy()
                     )
-                    failure_masks = _failure_masks(state, reference, anchor, endpoint_ids)
+                    failure_masks = _failure_masks(state, reference, anchor, endpoint_ids, endpoint_height_error_tolerance_m)
                     masks = [mask.detach().cpu().numpy() for mask in failure_masks]
                     for env_id in np.flatnonzero(active):
                         valid_lengths[env_id] += 1
@@ -212,6 +225,13 @@ def run_checkpoint_batch_eval(
                             if failed[env_id]:
                                 termination_reasons[env_id] = reason
                                 break
+                        if step+1 in sample_steps or termination_reasons[env_id] is not None:
+                            curves[env_id].append(dict(step=step+1, elapsed_s=(step+1)/fps,
+                                **{key:float(value[env_id]) for key,value in diagnostics_np.items()},
+                                mpjpe_m=float(position_metrics['mpjpe'][env_id]/1000),
+                                root_pos_error_m=float(torch.linalg.norm(state['body_pos_w'][env_id,root]-reference['body_pos_w'][env_id,root]).item()),
+                                root_orientation_error_rad=float(quat_error_magnitude(reference['body_quat_w'][env_id,root],state['body_quat_w'][env_id,root]).item()),
+                                joint_rmse_rad=float(metrics['error_joint_pos'][env_id].item()/np.sqrt(state_np['joint_pos'].shape[-1]))))
                 steps_run += 1
                 if writer is not None:
                     writer.append_data(base_env.render())
@@ -238,7 +258,8 @@ def run_checkpoint_batch_eval(
         payload.update({f"initial_{key}": value for key, value in initial.items()})
         payload["valid_lengths"] = valid_lengths
         payload["fps"] = np.array([fps], dtype=np.float32)
-        extra = metadata(base_env, has_delta_policy=False)
+        payload['env_origins'] = base_env.scene.env_origins.detach().cpu().numpy()
+        extra = metadata(base_env, has_delta_policy=before_step is not None and bool(experiment_metadata and experiment_metadata.get('ensemble_checkpoints')))
         for key in ("joint_names", "body_names", "default_joint_pos", "action_scale", "action_mode"):
             if key in extra:
                 payload[key] = np.asarray(extra[key])
@@ -257,6 +278,7 @@ def run_checkpoint_batch_eval(
                 for name, values in metric_sums.items()
             } | safety_metrics,
             "safety": safety_details,
+            "diagnostic_curve": curves[env_id],
         })
     result = {
         "policy_type": "g1_checkpoint", "metric_basis": "g1_14_body_source_tracking",
@@ -268,8 +290,16 @@ def run_checkpoint_batch_eval(
         "termination_reason": next((item["termination_reason"] for item in rollouts if item["terminated"]), "reference_complete"),
         "recording_npz": str(npz_path), "video_mp4": str(video_path) if video_path else "",
         "safety_definitions": SAFETY_DEFINITIONS,
+        "experiment": experiment_metadata or {},
+        "termination_definition": {
+            "profile": "isaac_batch", "anchor_height_error_m": 0.25,
+            "projected_gravity_z_error": 0.8,
+            "endpoint_height_error_m": endpoint_height_error_tolerance_m,
+            "endpoint_names": [body_names[i] for i in endpoint_ids],
+            "nonfinite_state_check": True,
+        },
     }
     json_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"[Checkpoint batch] Saved {npz_path} and {json_path}", flush=True)
-    if result["terminated"]:
+    if fail_on_termination and result["terminated"]:
         raise RuntimeError(f"Checkpoint batch rollout failed: {result['termination_reason']}")

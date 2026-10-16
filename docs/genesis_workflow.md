@@ -15,6 +15,18 @@ python scripts/eval_sim2sim_genesis.py \
 
 The BeyondMimic policy reads its reference and controller metadata from ONNX. Explicitly set `--metric_num_envs` when all parallel environments should contribute tracking metrics; its default is one. `--record_video` captures execution, and `--viewer --show_reference` supports interactive inspection.
 
+The modular Genesis evaluator now uses the same failure checks as Isaac's
+`checkpoint_batch_eval.py`: nonfinite robot state, absolute pelvis-height error
+greater than 0.25 m, absolute projected-gravity z-component error greater than
+0.8, or absolute world-height error greater than 0.25 m for any ankle-roll or
+wrist-yaw link. The saved `termination_definition` records this protocol.
+Historical Genesis results used a 0.5 m pelvis-height threshold and no endpoint
+height checks; re-evaluate older policies before directly comparing rates.
+`full_clip_completion_pct` requires no failure through the entire horizon;
+`clip_survival_pct` averages the observed fraction of the horizon across scored
+rollouts, including the failing step. The older `success` field allows a five-step
+tolerance and is distinct from strict full-clip completion.
+
 ## Record target state/action trajectories
 
 ```bash
@@ -46,3 +58,22 @@ SONIC's reference is supplied as NPZ, with `--trajectory_index` for stacked data
 Closed-loop Genesis evaluation recomputes base policy joint actions from the evolving target state. In contrast, [delta replay](delta_replay_evaluation.md) fixes the recorded joint-action sequence and recomputes only the source correction. Compare these outcomes according to their different questions.
 
 The separate `scripts/rsl_rl/evaluate_sim2sim_genesis.py` is a legacy monolithic evaluator. Use the current modular `scripts/eval_sim2sim_genesis.py` entrypoint for the workflows above. `scripts/sim2sim_genesis/` contains the modular scene, controller, metrics, trajectory I/O and runner code; see the [architecture notes](archive/genesis_sim2sim_modular_refactor.md).
+
+## Pair Genesis with Isaac startup states
+
+Pass `--initial_state_npz path/to/isaac/rollout.npz` to initialize each Genesis
+environment from the archive's `initial_*` joint/root state fields. The archive
+must provide one state per environment plus joint/body names. This mode supports
+one parallel rollout batch; no additional startup noise is added, since the
+recorded Isaac states already contain the chosen randomization. Keep the noise
+and DR flags explicit, and preserve the input archive with the experiment.
+When `env_origins` is present, Isaac's grid-placement translations are removed
+before loading states into Genesis. For older archives without that field,
+provide positions already expressed in the reference motion's local world frame.
+This path also restores recorded velocities; native Genesis reference reset uses
+zero velocities, so paired-state runs are a different initialization protocol.
+Logged world angular velocity is converted to the body-local free-root rotational
+DOFs before writing the Genesis state. Verify the actual saved reset states when
+making paired comparisons, including both linear and angular velocities.
+Saved JSON includes actual `initial_states`, per-rollout failure reasons, and
+tracking samples every 0.25 seconds and at failure for checking the pairing.

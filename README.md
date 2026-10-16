@@ -27,6 +27,8 @@ The delta helper emulates a dynamics gap during source training/evaluation. In t
 - [Motion relevance](docs/motion_relevance.md)
 - [Segment demo videos and ONNX export](docs/segment_artifacts.md)
 - [Genesis evaluation and recording](docs/genesis_workflow.md)
+- [Ensemble-gated finetuning and Genesis sweep](docs/ensemble_finetune_sweep.md)
+- [Ensemble transfer hypothesis, results and experiment ledger](docs/ensemble_transfer_research.md)
 - [Delta model inputs and outputs](docs/model_interfaces.md)
 - [Pelvis-wrench dynamics emulation](docs/pelvis_wrench_delta.md)
 - [Single-checkpoint replay evaluation, aggregation and plots](docs/delta_replay_evaluation.md)

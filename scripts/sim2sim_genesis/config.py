@@ -9,6 +9,28 @@ from sim2sim_genesis.constants import DEFAULT_NEXT_LAB_DATE
 from sim2sim_genesis.experiment import ExperimentConfig
 
 
+def load_logged_initial_states(path, num_envs):
+    """Load one paired startup batch and remove Isaac placement offsets, if saved."""
+    import numpy as np
+    with np.load(path, allow_pickle=True) as archive:
+        initial = {key:archive[key] for key in archive.files if key.startswith('initial_')}
+        initial['joint_names'] = archive['joint_names'].tolist()
+        initial['body_names'] = archive['body_names'].tolist()
+        if 'env_origins' in archive:
+            origins = archive['env_origins']
+            if origins.shape != (num_envs,3):
+                raise ValueError('env_origins must have shape [num_envs, 3]')
+            initial['initial_body_pos_w'] = initial['initial_body_pos_w'] - origins[:,None,:]
+    for key in ('initial_joint_pos','initial_joint_vel','initial_body_pos_w','initial_body_quat_w'):
+        if key not in initial or initial[key].shape[0] != num_envs:
+            raise ValueError(f'{key} must provide one state per environment')
+    if any(not np.isfinite(value).all() for key,value in initial.items() if key.startswith('initial_')):
+        raise ValueError('Nonfinite logged initial state')
+    if 'pelvis' not in initial['body_names']:
+        raise ValueError('Logged initial states must include pelvis')
+    return initial
+
+
 @dataclass(slots=True)
 class EvalConfig:
     """Normalized runtime options for a Genesis sim2sim rollout."""
@@ -40,6 +62,8 @@ class EvalConfig:
     output_motion_npz: str | None
     video_name: str | None
     seed: int | None
+    initial_state_npz: str | None = None
+    endpoint_height_error_tolerance_m: float = 0.25
     experiment: ExperimentConfig | None = None
     policy_type: str = "beyondmimic"
     sonic_model_dir: str | None = None

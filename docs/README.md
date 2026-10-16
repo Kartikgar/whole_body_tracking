@@ -17,6 +17,8 @@ This project studies G1 humanoid motion tracking and whether learned residual dy
 - **Prepare and combine data:** [Motion and trajectory datasets](datasets.md).
 - **Record target dynamics:** [Genesis simulation and recording](genesis_workflow.md); [physical-property overrides](genesis_experiments.md).
 - **Test a supplied delta checkpoint:** [Delta replay evaluation](delta_replay_evaluation.md), including independent runs, aggregation and Matplotlib plots.
+- **Tune ensemble gating through Genesis:** [Ensemble-gated finetuning sweep](ensemble_finetune_sweep.md).
+- **Understand the ensemble transfer result:** [Research hypothesis and interpretation](ensemble_transfer_research.md); [experiment ledger and evidence](ensemble_transfer_experiment_ledger.md).
 - **Understand the wrench model:** [Pelvis-wrench dynamics emulation](pelvis_wrench_delta.md).
 - **Understand resets and sampling:** [Episode length and motion sampling](episode_length_resets_motion_sampling.md).
 - **Read VLM descriptions:** [Motion captioning](motion_captioning.md).

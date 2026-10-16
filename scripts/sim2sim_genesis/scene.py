@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from sim2sim_genesis.constants import G1_ALL_BODY_JOINT_NAMES, resolve_urdf_child_link_names
+from sim2sim_genesis.math_utils import quat_rotate_inverse_wxyz
 
 
 def add_robot_entity(gs_module: Any, scene: Any, urdf_file: str | None, xml_file: str | None):
@@ -357,7 +358,8 @@ class GenesisSceneAdapter:
             qvel[:3] = root_lin_vel
         if initial_body_ang_vel_w is not None:
             root_ang_vel = np.asarray(initial_body_ang_vel_w, dtype=np.float32).reshape(-1, 3)[root_body_index]
-            qvel[3:6] = root_ang_vel
+            # Genesis free-root rotational DOFs are body-local; logged angular velocity is world-frame.
+            qvel[3:6] = quat_rotate_inverse_wxyz(root_quaternion, root_ang_vel)
         for joint_index, dof_index in enumerate(self.joint_dof_indices):
             qvel[6 + joint_index] = joint_velocities[joint_index]
 

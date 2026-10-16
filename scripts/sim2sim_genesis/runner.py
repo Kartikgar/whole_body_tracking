@@ -7,9 +7,10 @@ from typing import Any
 
 import numpy as np
 
-from sim2sim_genesis.config import EvalConfig, default_eval_artifact_path
+from sim2sim_genesis.config import EvalConfig, default_eval_artifact_path, load_logged_initial_states
 from sim2sim_genesis.domain_randomization import DomainRandomizer
 from sim2sim_genesis.metrics import TrackingMetricsEvaluator, compute_metrics_lite
+from sim2sim_genesis.math_utils import quat_error_magnitude_wxyz
 from sim2sim_genesis.observations import ObservationBuilder
 from sim2sim_genesis.scene import GenesisSceneAdapter
 from sim2sim_genesis.trajectory_io import TrajectoryRecorder
@@ -92,6 +93,11 @@ class Sim2SimRunner:
         metric_target_envs = self.config.metric_num_envs if metrics_enabled else 0
         metric_envs_done = 0
         success_metric_envs = 0
+        metric_rollouts = []
+        logged_initial = None
+        initial_states = []
+        if self.config.initial_state_npz:
+            logged_initial = load_logged_initial_states(self.config.initial_state_npz, self.config.num_envs)
         record_motion_enabled = self.trajectory_recorder is not None and self.config.record_motion
         target_for_npz = self.config.target_trajectories if record_motion_enabled else 0
 
@@ -122,15 +128,27 @@ class Sim2SimRunner:
             joint_qpos_noise_range = (
                 self.config.startup_qpos_joint_range if self.config.randomize_startup_qpos else None
             )
-            self.scene.reset_to_reference(
-                reference0,
-                rng=self.rng if self.config.randomize_startup_qpos else None,
-                joint_qpos_noise_range=joint_qpos_noise_range,
-            )
+            if logged_initial is None:
+                self.scene.reset_to_reference(
+                    reference0,
+                    rng=self.rng if self.config.randomize_startup_qpos else None,
+                    joint_qpos_noise_range=joint_qpos_noise_range,
+                )
+            else:
+                if rollout_count:
+                    raise ValueError('Logged initial states support one parallel rollout batch only')
+                self.scene.reset_from_logged_state_batch(
+                    logged_joint_names=logged_initial['joint_names'],
+                    root_body_index=logged_initial['body_names'].index('pelvis'),
+                    **{key:logged_initial[key] for key in logged_initial if key.startswith('initial_')})
             self.observation_builder.reset()
             self.domain_randomizer.reset_rollout()
             self.scene.update_reference_markers(reference0)
             state_batch = self.scene.extract_state_batch()
+            if metrics_enabled:
+                initial_states = [{key:state_batch[key][i].tolist() for key in
+                                   ('joint_pos','joint_vel','body_pos_w','body_quat_w','body_lin_vel_w','body_ang_vel_w')}
+                                  for i in range(self.config.num_envs)]
             if self.trajectory_recorder is not None:
                 # Capture the reset state so recorded samples are aligned as (s_t, a_t).
                 self.trajectory_recorder.capture_initial_if_new_traj(state_batch)
@@ -147,6 +165,10 @@ class Sim2SimRunner:
             rollout_body_pos_gt: list[np.ndarray] = []
             env_done = np.zeros(self.config.num_envs, dtype=bool)
             env_end_step = np.full(self.config.num_envs, self.max_steps, dtype=np.int32)
+            env_reasons = ['reference_complete'] * self.config.num_envs
+            env_curves = [[] for _ in range(self.config.num_envs)]
+            sample_steps = {int(np.floor(t / self.config.control_dt + .5))
+                            for t in np.arange(.25, self.max_steps*self.config.control_dt+1e-9,.25)}
 
             for t_step in range(self.max_steps):
                 reference_step = self.start_timestep + t_step
@@ -189,8 +211,15 @@ class Sim2SimRunner:
                         if env_terminated:
                             env_done[env_id] = True
                             env_end_step[env_id] = t_step + 1
+                            env_reasons[env_id] = env_reason
                             if env_id == 0:
                                 termination_reason = env_reason
+                        if t_step+1 in sample_steps or env_terminated:
+                            env_curves[env_id].append(dict(step=t_step+1, elapsed_s=(t_step+1)*self.config.control_dt,
+                                mpjpe_m=float(np.linalg.norm(env_state['body_pos_w']-env_reference['body_pos_w'],axis=-1).mean()),
+                                root_pos_error_m=float(np.linalg.norm(env_state['body_pos_w'][self.scene.root_idx]-env_reference['body_pos_w'][self.scene.root_idx])),
+                                root_orientation_error_rad=float(quat_error_magnitude_wxyz(env_reference['body_quat_w'][self.scene.root_idx],env_state['body_quat_w'][self.scene.root_idx])),
+                                joint_rmse_rad=float(np.sqrt(np.mean((env_state['joint_pos']-env_reference['joint_pos'])**2)))))
 
                 step_metrics = self.metrics_evaluator.tracking_metrics(state, reference)
                 terminated = bool(step_metrics.pop("terminated"))
@@ -257,6 +286,7 @@ class Sim2SimRunner:
                     pred_pos_aligned = pred_pos - spacing_offset[None, None, :]
                     lite_metrics = compute_metrics_lite(pred_pos_aligned, gt_pos, root_idx=self.scene.root_idx)
                     is_success = int(env_end_step[env_id]) >= max(self.max_steps - 5, 1)
+                    completed = not bool(env_done[env_id]) and steps_this_rollout >= self.max_steps
                     env_metrics = {
                         "mpjpe": float(lite_metrics["mpjpe_g"].mean()) if lite_metrics["mpjpe_g"].size > 0 else float("nan"),
                         "mpjpe_l": float(lite_metrics["mpjpe_l"].mean()) if lite_metrics["mpjpe_l"].size > 0 else float("nan"),
@@ -272,6 +302,10 @@ class Sim2SimRunner:
                     if is_success:
                         success_metric_envs += 1
                     metric_envs_done += 1
+                    metric_rollouts.append(dict(rollout=rollout_count, env_id=env_id,
+                                                survived_steps=traj_len, completed=completed,
+                                                success=bool(is_success), termination_reason=env_reasons[env_id],
+                                                diagnostic_curve=env_curves[env_id], **env_metrics))
                     if metrics_pbar is not None:
                         metrics_pbar.update(1)
 
@@ -317,6 +351,8 @@ class Sim2SimRunner:
         motion_npz_path = self.trajectory_recorder.save() if self.trajectory_recorder is not None else None
         output = {
             "evaluation_seed": self.config.seed,
+            "initial_state_npz": self.config.initial_state_npz,
+            "initial_states": initial_states,
             "policy_type": self.config.policy_type,
             "policy_metadata_json": __import__("json").dumps(
                 getattr(self.policy, "artifact_metadata", {}), sort_keys=True
@@ -326,6 +362,7 @@ class Sim2SimRunner:
             "num_envs": self.config.num_envs,
             "domain_randomization": int(self.config.domain_randomization),
             "randomize_startup_qpos": int(self.config.randomize_startup_qpos),
+            "add_noise": int(self.config.add_noise),
             "startup_qpos_joint_range_low": self.config.startup_qpos_joint_range[0],
             "startup_qpos_joint_range_high": self.config.startup_qpos_joint_range[1],
             "steps": total_steps,
@@ -356,6 +393,13 @@ class Sim2SimRunner:
                 100.0 * float(success_metric_envs) / float(metric_envs_done) if metric_envs_done > 0 else 0.0
             )
             output["success_envs"] = success_metric_envs
+            output["rollout_metrics"] = metric_rollouts
+            output["termination_definition"] = self.metrics_evaluator.termination_definition()
+            output["full_clip_completion_pct"] = (100.0 * sum(r["completed"] for r in metric_rollouts) / metric_envs_done
+                                                  if metric_envs_done else 0.0)
+            output["clip_survival_pct"] = (100.0 * sum(r["survived_steps"] for r in metric_rollouts) / (metric_envs_done * self.max_steps)
+                                           if metric_envs_done else 0.0)
+            output["success_tolerance_steps"] = 5
             for metric_name in ("mpjpe", "mpjpe_l", "accel_dist", "vel_dist"):
                 mean_all, std_all = self.build_summary_metrics(rollout_metric_values_all[metric_name])
                 mean_succ, std_succ = self.build_summary_metrics(rollout_metric_values_succ[metric_name])

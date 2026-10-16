@@ -121,6 +121,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compute_metrics", action="store_true", help="Enable MPJPE/velocity/acceleration metrics.")
     parser.add_argument("--metric_num_envs", type=int, default=1, help="Number of environment trajectories to score.")
     parser.add_argument(
+        "--endpoint-height-error-tolerance-m",
+        type=float,
+        default=0.25,
+        help="Maximum ankle/wrist vertical tracking error before Genesis termination (Isaac batch profile).",
+    )
+    parser.add_argument(
         "--add_noise",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -153,6 +159,7 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--seed", type=int, default=None, help="Optional global seed for evaluation.")
+    parser.add_argument("--initial_state_npz", help="Initialize each environment from initial_* fields of a logged NPZ; uses its already randomized states without adding startup noise again.")
     parser.add_argument("--show_reference", action="store_true", help="Visualize reference body markers.")
     parser.add_argument(
         "--reference_marker_radius",
@@ -286,6 +293,8 @@ def build_eval_config(args: argparse.Namespace, outputs: OutputTargets) -> EvalC
         output_motion_npz=outputs.output_motion_npz,
         video_name=args.video_name,
         seed=args.seed,
+        initial_state_npz=args.initial_state_npz,
+        endpoint_height_error_tolerance_m=float(args.endpoint_height_error_tolerance_m),
         experiment=load_experiment(args.experiment_config),
         policy_type=args.policy_type,
         sonic_model_dir=args.sonic_model_dir,
@@ -341,6 +350,8 @@ def build_runner(config: EvalConfig) -> Sim2SimRunner:
         body_names=policy.meta.body_names,
         anchor_idx=scene.anchor_idx,
         root_idx=scene.root_idx,
+        termination_profile="isaac_batch",
+        endpoint_height_error_tolerance_m=config.endpoint_height_error_tolerance_m,
     )
     domain_randomizer = DomainRandomizer(
         scene=scene,

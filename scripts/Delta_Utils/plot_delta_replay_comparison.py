@@ -49,6 +49,9 @@ def main():
     parser.add_argument('--highlight_models', nargs='+', default=[], metavar='LABEL',
                         help='Enclose adjacent model tick labels in a red outline')
     parser.add_argument('--oracle_model', help='Label to annotate as Oracle')
+    parser.add_argument('--model_group', nargs='+', action='append', default=[],
+                        metavar='TEXT_OR_MODEL',
+                        help='Group annotation followed by model labels; repeat for multiple brackets')
     parser.add_argument('--oracle_style', choices=('pointer', 'badge', 'inline'), default='pointer',
                         help='Presentation of the optional Oracle annotation')
     args = parser.parse_args()
@@ -63,6 +66,12 @@ def main():
         parser.error('Invalid horizon or bootstrap sample count')
     values, trajectories, window_count = paired_trajectory_means(comparison, steps)
     labels = list(values)
+    for group in args.model_group:
+        if len(group) < 3 or any(model not in labels for model in group[1:]):
+            parser.error('--model_group requires an annotation and at least two valid model labels')
+        positions = [labels.index(model) for model in group[1:]]
+        if len(set(positions)) != len(positions) or max(positions) - min(positions) + 1 != len(positions):
+            parser.error('--model_group models must be distinct and adjacent in comparison order')
     if any(label not in labels for label in args.highlight_models):
         parser.error('--highlight_models must name models in the comparison')
     if args.oracle_model is not None and args.oracle_model not in labels:
@@ -124,6 +133,7 @@ def main():
         # Figure coordinates keep the geometry identical in PNG and vector PDF exports.
         from matplotlib.patches import Rectangle
         from matplotlib.transforms import Bbox
+        from matplotlib.lines import Line2D
         if args.oracle_model and args.oracle_style == 'inline':
             for ax in fig.axes:
                 for axis in (ax.xaxis, ax.yaxis):
@@ -135,6 +145,37 @@ def main():
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
         for ax in fig.axes:
+            for direction, ticks in (('x', ax.get_xticklabels()), ('y', ax.get_yticklabels())):
+                visible = [tick for tick in ticks if tick.get_visible()]
+                if not visible:
+                    continue
+                all_bounds = Bbox.union([tick.get_window_extent(renderer) for tick in visible])
+                unit = fig.dpi / 72
+                for group in args.model_group:
+                    selected = [tick for tick in visible
+                                if tick_model_names.get(tick.get_text(), tick.get_text()) in group[1:]]
+                    if len(selected) != len(group) - 1:
+                        continue
+                    bounds = Bbox.union([tick.get_window_extent(renderer) for tick in selected])
+                    if direction == 'y':
+                        x = all_bounds.x0 - 12 * unit
+                        points = [(x + 5*unit, bounds.y0), (x, bounds.y0),
+                                  (x, bounds.y1), (x + 5*unit, bounds.y1)]
+                        position = (x - 30*unit, (bounds.y0 + bounds.y1)/2)
+                        rotation, alignment = 90, 'center'
+                        text = group[0].replace(' ', '\n', 1)
+                    else:
+                        y = all_bounds.y0 - 12 * unit
+                        points = [(bounds.x0, y + 5*unit), (bounds.x0, y),
+                                  (bounds.x1, y), (bounds.x1, y + 5*unit)]
+                        position = ((bounds.x0 + bounds.x1)/2, y - 15*unit)
+                        rotation, alignment, text = 0, 'center', group[0]
+                    points = fig.transFigure.inverted().transform(points)
+                    position = fig.transFigure.inverted().transform(position)
+                    fig.add_artist(Line2D(points[:, 0], points[:, 1], transform=fig.transFigure,
+                                          color='#444444', linewidth=1.2, clip_on=False))
+                    fig.text(*position, text, transform=fig.transFigure, rotation=rotation,
+                             ha=alignment, va='center', fontsize=17, color='#444444')
             for ticks in (ax.get_xticklabels(), ax.get_yticklabels()):
                 selected = [(i, tick) for i, tick in enumerate(ticks) if tick.get_visible()
                             and tick_model_names.get(tick.get_text(), tick.get_text()) in args.highlight_models]
@@ -152,7 +193,7 @@ def main():
                     bounds = bounds.transformed(fig.transFigure.inverted())
                     fig.add_artist(Rectangle((bounds.x0, bounds.y0), bounds.width, bounds.height,
                                              transform=fig.transFigure, fill=False,
-                                             edgecolor='#b62828', linewidth=1.3,
+                                             edgecolor='#b62828', linewidth=2.5,
                                              clip_on=False, zorder=20))
             if args.oracle_model and args.oracle_style != 'inline':
                 for direction, ticks in (('x', ax.get_xticklabels()), ('y', ax.get_yticklabels())):
@@ -183,7 +224,7 @@ def main():
         plt.close(fig)
 
     # Separate physical units rather than averaging incompatible error metrics.
-    fig, axes = plt.subplots(2, 3, figsize=(16, max(9, 1.1 * len(labels))), sharey=True)
+    fig, axes = plt.subplots(2, 3, figsize=(16, max(9, (1.45 if args.model_group else 1.1) * len(labels))), sharey=True)
     colors = ['#777777' if label == args.baseline else '#33789b' for label in labels]
     for row, prefix in enumerate(('mean', 'endpoint')):
         for col, metric in enumerate(('joint_pos_rmse_rad', 'body_pos_error_m', 'root_pos_error_m')):
@@ -212,7 +253,7 @@ def main():
     ax.set_xticks(range(len(learned)), [heatmap_labels[label] for label in learned])
     ax.set_yticks(range(len(keys)), [f'{"Mean" if key.startswith("mean_") else "Endpoint"} · '
                                    f'{METRICS[key.split("_", 1)[1]][0]}' for key in keys])
-    ax.set_xlabel('Delta model')
+    ax.set_xlabel('Delta model', labelpad=55 if args.model_group else 9)
     ax.set_ylabel('Tracking metric')
     for i, key in enumerate(keys):
         for j, label in enumerate(learned):
@@ -241,7 +282,7 @@ def main():
         ax.grid(axis='x', alpha=.2)
         ax.xaxis.set_major_locator(MaxNLocator(nbins=4, min_n_ticks=3))
     fig.suptitle(f'{title_prefix}Paired endpoint error differences', fontsize=24)
-    fig.tight_layout(rect=(0, 0, 1, .96))
+    fig.tight_layout(rect=(0, 0, 1, .96), w_pad=8 if args.model_group else 1.08)
     save(fig, 'paired_trajectory_transfer')
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 7))
@@ -257,7 +298,7 @@ def main():
         ax.set_xlabel(f'Mean wrench magnitude ({unit})')
         ax.grid(axis='x', alpha=.2)
         ax.xaxis.set_major_locator(MaxNLocator(nbins=4, min_n_ticks=3))
-    fig.tight_layout()
+    fig.tight_layout(w_pad=8 if args.model_group else 1.08)
     save(fig, 'applied_wrenches')
     print(f'Plots and paired statistics: {output.resolve()}')
 

@@ -1,10 +1,11 @@
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 
-NEXT_LAB_DATE = "2026.10.14"
+NEXT_LAB_DATE = "2026.10.21"
 
 @configclass
 class G1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    preserve_frozen_policy_rng: bool = False
     num_steps_per_env = 24
     max_iterations = 30000
     save_interval = 500

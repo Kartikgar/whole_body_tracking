@@ -71,6 +71,32 @@ class TrackingMetricsEvaluator:
     body_names: list[str]
     anchor_idx: int
     root_idx: int
+    termination_profile: str = "legacy"
+    endpoint_height_error_tolerance_m: float = 0.25
+
+    def __post_init__(self):
+        if self.termination_profile not in ("legacy", "isaac_batch"):
+            raise ValueError(f"Unknown termination profile: {self.termination_profile}")
+        if not np.isfinite(self.endpoint_height_error_tolerance_m) or self.endpoint_height_error_tolerance_m <= 0:
+            raise ValueError("endpoint_height_error_tolerance_m must be finite and positive")
+        if self.termination_profile == "isaac_batch":
+            # Fail early rather than silently dropping any Isaac endpoint checks.
+            for name in self.endpoint_names:
+                self.body_names.index(name)
+
+    @property
+    def endpoint_names(self):
+        return ("left_ankle_roll_link", "right_ankle_roll_link",
+                "left_wrist_yaw_link", "right_wrist_yaw_link")
+
+    def termination_definition(self):
+        return dict(profile=self.termination_profile,
+                    anchor_height_error_m=0.25 if self.termination_profile == "isaac_batch" else 0.5,
+                    projected_gravity_z_error=0.8,
+                    endpoint_height_error_m=(self.endpoint_height_error_tolerance_m
+                                             if self.termination_profile == "isaac_batch" else None),
+                    endpoint_names=list(self.endpoint_names) if self.termination_profile == "isaac_batch" else [],
+                    nonfinite_state_check=self.termination_profile == "isaac_batch")
 
     def compute_body_relative_targets(
         self, state: dict[str, np.ndarray], reference: dict[str, np.ndarray]
@@ -102,12 +128,17 @@ class TrackingMetricsEvaluator:
 
         del body_pos_relative
 
+        if self.termination_profile == "isaac_batch":
+            if any(not np.isfinite(value).all() for value in state.values()):
+                return True, "nonfinite_state"
+
         robot_anchor_pos = state["body_pos_w"][self.anchor_idx]
         robot_anchor_quat = state["body_quat_w"][self.anchor_idx]
         ref_anchor_pos = reference["body_pos_w"][self.anchor_idx]
         ref_anchor_quat = reference["body_quat_w"][self.anchor_idx]
 
-        if abs(ref_anchor_pos[2] - robot_anchor_pos[2]) > 0.5:
+        height_limit = 0.25 if self.termination_profile == "isaac_batch" else 0.5
+        if abs(ref_anchor_pos[2] - robot_anchor_pos[2]) > height_limit:
             return True, "anchor_pos_z"
 
         gravity = np.array([0.0, 0.0, -1.0], dtype=np.float32)
@@ -115,6 +146,12 @@ class TrackingMetricsEvaluator:
         robot_projected_gravity = quat_rotate_inverse_wxyz(robot_anchor_quat, gravity)
         if abs(motion_projected_gravity[2] - robot_projected_gravity[2]) > 0.8:
             return True, "anchor_ori"
+
+        if self.termination_profile == "isaac_batch":
+            endpoints = [self.body_names.index(name) for name in self.endpoint_names]
+            height_error = np.abs(state["body_pos_w"][endpoints, 2] - reference["body_pos_w"][endpoints, 2])
+            if height_error.max() > self.endpoint_height_error_tolerance_m:
+                return True, "end_effector_vertical_error"
 
         return False, "completed"
 

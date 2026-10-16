@@ -28,7 +28,11 @@ parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--motion_file", type=str, default=None, help="Path to the motion file.")
 parser.add_argument("--seed", type=int, default=None, help="Seed for deterministic evaluation.")
 parser.add_argument("--batch_eval", action="store_true", help="Run one full-clip checkpoint evaluation per environment.")
+parser.add_argument("--batch_allow_failures", action="store_true", help="Save expected rollout failures without treating them as a worker error.")
+parser.add_argument("--export_only", action="store_true", help="Export the base policy and full motion reference, then exit.")
 parser.add_argument("--batch_spawn_joint_noise_rad", type=float, default=0.01)
+parser.add_argument("--batch_endpoint_height_error_tolerance_m", type=float, default=0.25,
+                    help="Ankle/wrist vertical-error termination threshold for full-clip batch evaluation.")
 parser.add_argument("--batch_output_json", type=str, default=None)
 parser.add_argument("--batch_output_npz", type=str, default=None)
 parser.add_argument("--batch_video_folder", type=str, default=None)
@@ -1094,12 +1098,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.sim.device = args_cli.device
     agent_cfg.device = args_cli.device
     if args_cli.batch_eval:
-        if args_cli.task != "Tracking-Flat-G1-v0":
-            raise ValueError("Batch evaluation supports Tracking-Flat-G1-v0 only")
+        if args_cli.task not in ("Tracking-Flat-G1-v0", "Tracking-Flat-G1-DeltaWrench-Finetune-v0"):
+            raise ValueError("Batch evaluation supports base tracking and pelvis-wrench finetune tasks only")
         if not args_cli.motion_file or not args_cli.checkpoint or not args_cli.batch_output_json or not args_cli.batch_output_npz:
             raise ValueError("Batch evaluation requires motion_file, checkpoint, batch_output_json and batch_output_npz")
         if args_cli.batch_spawn_joint_noise_rad < 0:
             raise ValueError("batch_spawn_joint_noise_rad must be nonnegative")
+        if not np.isfinite(args_cli.batch_endpoint_height_error_tolerance_m) or args_cli.batch_endpoint_height_error_tolerance_m <= 0:
+            raise ValueError("batch_endpoint_height_error_tolerance_m must be finite and positive")
         with np.load(args_cli.motion_file, allow_pickle=False) as motion_data:
             joint_pos = motion_data["joint_pos"]
             if joint_pos.ndim != 2:
@@ -1244,11 +1250,36 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # load previously trained model
     ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    ppo_runner.load(resume_path)
+    if args_cli.export_only and args_cli.task == "Tracking-Flat-G1-v0":
+        # A wrench-finetuned checkpoint contains a normal joint-action base actor.
+        # Export that actor without injecting its frozen source-simulator ensemble.
+        loaded = torch.load(resume_path, map_location="cpu", weights_only=False)
+        metadata = (loaded.get("infos") or {}).get("pelvis_wrench")
+        if metadata is not None and metadata.get("role") != "finetune":
+            raise ValueError("Only base actors, not open-loop wrench actors, support deployment export")
+        from rsl_rl.runners import OnPolicyRunner as BaseOnPolicyRunner
+        BaseOnPolicyRunner.load(ppo_runner, resume_path, load_optimizer=False)
+    else:
+        ppo_runner.load(resume_path)
 
     # obtain the trained policy for inference
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
     if args_cli.batch_eval:
+        def inject_batch_delta(actions):
+            if ppo_runner.delta_policy is None:
+                return {}
+            ppo_runner._set_delta_base_action_buffer(actions)
+            delta_obs = ppo_runner._compute_delta_policy_obs()
+            delta = ppo_runner._compute_delta_actions(delta_obs)
+            delta = ppo_runner._apply_delta_injection_mask(delta)
+            ppo_runner._set_delta_action_buffer(delta)
+            # Recompute raw predictions only for diagnostics; the applied action uses the production runner above.
+            raw = torch.stack([member.act_inference(norm(delta_obs)) for member, norm in
+                               zip(ppo_runner.delta_policies, ppo_runner.delta_obs_normalizers, strict=True)])
+            clip = env.unwrapped.action_manager.get_term('joint_pos').cfg.action_clip
+            return dict(uncertainty=ppo_runner.delta_policy_last_uncertainty,
+                        gate=ppo_runner.delta_policy_last_gate * ppo_runner.delta_policy_injection_mask.flatten(),
+                        member_saturation=(raw.abs() >= clip).float().mean(dim=(0, 2)))
         try:
             if args_cli.export_onnx_path:
                 output_path = pathlib.Path(args_cli.export_onnx_path).resolve()
@@ -1297,6 +1328,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 capture_state=_resolve_robot_state_components_for_logging,
                 bootstrap=_bootstrap_motion_reference_startup,
                 metadata=_resolve_state_action_metadata,
+                before_step=inject_batch_delta,
+                fail_on_termination=not args_cli.batch_allow_failures,
+                endpoint_height_error_tolerance_m=args_cli.batch_endpoint_height_error_tolerance_m,
+                experiment_metadata=dict(task=args_cli.task, domain_randomization=False, observation_noise=False,
+                                         gate_scale=ppo_runner.delta_policy_uncertainty_gate_scale,
+                                         injection_probability=ppo_runner.delta_policy_injection_probability,
+                                         ensemble_checkpoints=ppo_runner.delta_policy_checkpoints),
             )
         finally:
             env.close()
@@ -1426,6 +1464,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO]: Exported ONNX policy to: {os.path.join(export_model_dir, onnx_filename)}")
     else:
         print("[INFO]: Skipping deployment ONNX export for this task.")
+    if args_cli.export_only:
+        if not args_cli.export_onnx_path or args_cli.task != "Tracking-Flat-G1-v0":
+            raise ValueError("--export_only requires the base tracking task and --export_onnx_path")
+        import onnx
+        import onnxruntime as ort
+        output_path = pathlib.Path(args_cli.export_onnx_path).resolve()
+        model = onnx.load(str(output_path))
+        for key, value in {"checkpoint_path": resume_path, "motion_file": motion_file_override}.items():
+            entry = model.metadata_props.add()
+            entry.key, entry.value = key, str(value)
+        onnx.checker.check_model(model)
+        onnx.save(model, str(output_path))
+        export_obs, _ = env.reset()
+        with torch.inference_mode():
+            expected_actions = policy(export_obs[:1]).detach().cpu().numpy()
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = options.inter_op_num_threads = 1
+        session = ort.InferenceSession(str(output_path), sess_options=options, providers=["CPUExecutionProvider"])
+        actual_actions = session.run(["actions"], {
+            "obs": export_obs[:1].detach().cpu().numpy(), "time_step": np.zeros((1, 1), dtype=np.float32),
+        })[0]
+        np.testing.assert_allclose(actual_actions, expected_actions, rtol=1e-4, atol=1e-4)
+        print("[INFO]: Verified exported ONNX actions against the loaded base actor.", flush=True)
+        env.close()
+        return
     obs_split_cache: dict[str, tuple[list[str], list[int], list[str]]] = {}
     shutdown_requested_by_target = False
     source_metrics_tracker = None
@@ -1707,7 +1770,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
 
 if __name__ == "__main__":
-    if args_cli.batch_eval:
+    if args_cli.export_only:
+        from process_cleanup import run_and_close
+        run_and_close(main, simulation_app)
+    elif args_cli.batch_eval:
         # Kit can remain busy in close() after the rollout and its result files
         # are complete. Bound cleanup so the batch launcher can continue.
         import threading
@@ -1734,7 +1800,7 @@ if __name__ == "__main__":
         close_thread.join(timeout=10.0)
         if close_thread.is_alive():
             print("[Checkpoint batch] Isaac close exceeded 10 s; exiting process.", flush=True)
-            exit_code = 1
+            # A bounded Kit shutdown must preserve a completed rollout's status.
         if close_failed:
             exit_code = 1
         os._exit(exit_code)
