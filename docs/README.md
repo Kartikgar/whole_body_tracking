@@ -23,6 +23,12 @@ This project studies G1 humanoid motion tracking and whether learned residual dy
 - **Understand resets and sampling:** [Episode length and motion sampling](episode_length_resets_motion_sampling.md).
 - **Read VLM descriptions:** [Motion captioning](motion_captioning.md).
 
+## Weekly research logs
+
+- [Week of 2026.10.21](research_log/2026.10.21.md): m1_m2_m3 and m1_m2_m3_m4 pelvis-wrench deltas both transfer to m4 after 20 finetuning iterations.
+- [Week of 2026.10.28](research_log/2026.10.28.md): torso-payload pelvis-wrench delta, gap-model gating; best finetune λ = 1.0 without randomization.
+- [Week of 2026.11.04](research_log/2026.11.04.md): data-scale study; a delta from 100 episodes still transfers to m4 after finetuning.
+
 ## Detailed visual references
 
 These HTML pages contain additional diagrams and implementation explanations. Current CLI commands and contracts are maintained in the guides above.
