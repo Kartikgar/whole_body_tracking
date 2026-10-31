@@ -68,6 +68,12 @@ class G1FlatDeltaAFineTunePPORunnerCfg(G1FlatPPORunnerCfg):
     # Probability that a newly reset environment receives frozen-delta assistance
     # for its complete episode. A value of 1.0 preserves the original behavior.
     delta_policy_injection_probability: float = 1.0
+    # Uncertainty source for the soft gate exp(-delta_policy_uncertainty_gate_scale * u): "ensemble" (delta-member
+    # disagreement, needs >= 2 checkpoints) or "gap_model" (supervised gap-model ensemble at gap_model_checkpoint).
+    delta_policy_gate_source: str = "ensemble"
+    gap_model_checkpoint: str | None = None
+    # Constant multiplier applied to the frozen delta's (gated) output.
+    delta_policy_output_scale: float = 1.0
 
 
 @configclass

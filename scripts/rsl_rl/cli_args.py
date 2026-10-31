@@ -84,6 +84,27 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
             "The mask is sampled independently per environment at episode reset."
         ),
     )
+    arg_group.add_argument(
+        "--delta_policy_gate_source",
+        choices=("ensemble", "gap_model"),
+        default=None,
+        help=(
+            "Uncertainty used by the soft gate exp(-scale * u): 'ensemble' (delta-member disagreement) or "
+            "'gap_model' (supervised gap-model ensemble from --gap_model_checkpoint; works with a single delta)."
+        ),
+    )
+    arg_group.add_argument(
+        "--delta_policy_output_scale",
+        type=float,
+        default=None,
+        help="Constant multiplier on the frozen delta output (after any uncertainty gate). Default 1.0.",
+    )
+    arg_group.add_argument(
+        "--gap_model_checkpoint",
+        type=str,
+        default=None,
+        help="Gap-model ensemble checkpoint (model.pt from scripts/Delta_Utils/train_gap_model.py).",
+    )
 
 
 def parse_rsl_rl_cfg(task_name: str, args_cli: argparse.Namespace) -> RslRlOnPolicyRunnerCfg:
@@ -147,6 +168,9 @@ def update_rsl_rl_cfg(agent_cfg: RslRlOnPolicyRunnerCfg, args_cli: argparse.Name
         and hasattr(agent_cfg, "delta_policy_injection_probability")
     ):
         agent_cfg.delta_policy_injection_probability = args_cli.delta_policy_injection_probability
+    for name in ("delta_policy_gate_source", "gap_model_checkpoint", "delta_policy_output_scale"):
+        if getattr(args_cli, name, None) is not None and hasattr(agent_cfg, name):
+            setattr(agent_cfg, name, getattr(args_cli, name))
     # set the project name for wandb and neptune
     if agent_cfg.logger in {"wandb", "neptune"} and args_cli.log_project_name:
         agent_cfg.wandb_project = args_cli.log_project_name

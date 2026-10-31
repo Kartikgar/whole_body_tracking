@@ -52,6 +52,10 @@ class MotionOnPolicyRunner(OnPolicyRunner):
         self.delta_policy_require = bool(self.cfg.get("delta_policy_require", False))
         self.delta_policy_clip_actions = self.cfg.get("delta_policy_clip_actions", self.env.clip_actions)
         self.delta_policy_uncertainty_gate_scale = float(self.cfg.get("delta_policy_uncertainty_gate_scale", 1.0))
+        # Constant multiplier on the (gated) delta output; 1.0 keeps the original behaviour.
+        self.delta_policy_output_scale = float(self.cfg.get("delta_policy_output_scale", 1.0))
+        if not 0.0 <= self.delta_policy_output_scale:
+            raise ValueError(f"delta_policy_output_scale must be >= 0, got {self.delta_policy_output_scale}")
         self.delta_policy_injection_probability = float(
             self.cfg.get("delta_policy_injection_probability", 1.0)
         )
@@ -60,6 +64,14 @@ class MotionOnPolicyRunner(OnPolicyRunner):
                 "delta_policy_injection_probability must be in [0, 1], got "
                 f"{self.delta_policy_injection_probability}."
             )
+        # Gate source: "ensemble" = disagreement of >= 2 delta members (original behaviour); "gap_model" = epistemic
+        # uncertainty of a supervised gap-model ensemble (utils/gap_model.py) evaluated on the delta observation.
+        self.delta_policy_gate_source = str(self.cfg.get("delta_policy_gate_source", "ensemble"))
+        if self.delta_policy_gate_source not in ("ensemble", "gap_model"):
+            raise ValueError(f"delta_policy_gate_source must be 'ensemble' or 'gap_model', got {self.delta_policy_gate_source!r}")
+        self.gap_model_checkpoint = self.cfg.get("gap_model_checkpoint")
+        self.gap_model = None
+        self.gap_model_columns: torch.Tensor | None = None
         self.delta_policy_injection_mask = torch.ones(
             self.env.num_envs, 1, dtype=torch.float32, device=self.device
         )
@@ -82,6 +94,25 @@ class MotionOnPolicyRunner(OnPolicyRunner):
                 self._load_delta_policies(self.delta_policy_checkpoints)
         elif self.delta_policy_require:
             raise ValueError("`delta_policy_require=True` but no `delta_policy_checkpoints` were provided.")
+        if self.delta_policy_gate_source == "gap_model":
+            if not self.gap_model_checkpoint:
+                raise ValueError("delta_policy_gate_source='gap_model' requires gap_model_checkpoint")
+            if self.delta_policy is None:
+                raise ValueError("delta_policy_gate_source='gap_model' requires delta_policy_checkpoints")
+            self._load_gap_model(self.gap_model_checkpoint)
+
+    def _load_gap_model(self, checkpoint: str):
+        """Load the gap-model ensemble and map its input features onto columns of the delta observation group."""
+        from whole_body_tracking.utils.gap_model import GapEnsemble, gap_model_obs_columns
+
+        manager = self.env.unwrapped.observation_manager
+        names = manager.active_terms[self.delta_policy_obs_group]
+        dims = [int(torch.tensor(d).prod()) for d in manager.group_obs_term_dim[self.delta_policy_obs_group]]
+        self.gap_model = GapEnsemble.load(checkpoint, map_location=self.device).to(self.device)
+        self.gap_model_columns = torch.as_tensor(gap_model_obs_columns(names, dims, self.gap_model.x_names),
+                                                 device=self.device, dtype=torch.long)
+        print(f"[INFO]: Gap-model uncertainty gate from '{checkpoint}' ({len(self.gap_model.members)} members, "
+              f"{len(self.gap_model_columns)} input features); gate = exp(-{self.delta_policy_uncertainty_gate_scale:g} * u).")
 
     def _wrench_metadata(self):
         try:
@@ -331,7 +362,16 @@ class MotionOnPolicyRunner(OnPolicyRunner):
                 delta_policy.act_inference(delta_obs_normalizer(delta_obs)).detach()
                 for delta_policy, delta_obs_normalizer in zip(self.delta_policies, self.delta_obs_normalizers, strict=True)
             ]
-        if len(ensemble_actions) == 1:
+        if self.gap_model is not None:
+            # Soft gap-model gate: mean delta (single delta or ensemble mean) scaled by exp(-lambda * u_gap).
+            delta_actions = torch.stack(ensemble_actions, dim=0).mean(dim=0)
+            with torch.inference_mode():
+                uncertainty = self.gap_model.predict(delta_obs[:, self.gap_model_columns])["u"]
+            gate = torch.exp(-self.delta_policy_uncertainty_gate_scale * uncertainty)
+            delta_actions = delta_actions * gate.unsqueeze(-1)
+            self.delta_policy_last_uncertainty = uncertainty.detach().clone()
+            self.delta_policy_last_gate = gate.detach().clone()
+        elif len(ensemble_actions) == 1:
             delta_actions = ensemble_actions[0]
             self._reset_delta_ensemble_stats()
         else:
@@ -344,6 +384,8 @@ class MotionOnPolicyRunner(OnPolicyRunner):
             # Clone so cleanup/logging can safely touch these outside inference_mode.
             self.delta_policy_last_uncertainty = uncertainty.detach().clone()
             self.delta_policy_last_gate = gate.detach().clone()
+        if self.delta_policy_output_scale != 1.0:
+            delta_actions = delta_actions * self.delta_policy_output_scale
         if self.delta_policy_clip_actions is not None:
             delta_actions = torch.clamp(delta_actions, -self.delta_policy_clip_actions, self.delta_policy_clip_actions)
         return delta_actions
@@ -463,7 +505,7 @@ class MotionOnPolicyRunner(OnPolicyRunner):
             for name, value in term.consume_applied_wrench_log_stats().items():
                 self.writer.add_scalar(f"DeltaWrench/{name}", value, locs["it"])
         self._log_delta_action_magnitude_metrics(locs["it"])
-        if self.writer is not None and self.delta_policy_ensemble_size > 1:
+        if self.writer is not None and (self.delta_policy_ensemble_size > 1 or self.gap_model is not None):
             self.writer.add_scalar(
                 "DeltaEnsemble/epistemic_uncertainty_mean", float(self.delta_policy_last_uncertainty.mean().item()), locs["it"]
             )

@@ -1334,6 +1334,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 experiment_metadata=dict(task=args_cli.task, domain_randomization=False, observation_noise=False,
                                          gate_scale=ppo_runner.delta_policy_uncertainty_gate_scale,
                                          injection_probability=ppo_runner.delta_policy_injection_probability,
+                                         gate_source=ppo_runner.delta_policy_gate_source,
+                                         output_scale=ppo_runner.delta_policy_output_scale,
                                          ensemble_checkpoints=ppo_runner.delta_policy_checkpoints),
             )
         finally:
