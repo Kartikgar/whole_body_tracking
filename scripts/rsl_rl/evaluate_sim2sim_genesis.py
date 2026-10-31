@@ -45,7 +45,7 @@ try:
 except ImportError:
     tqdm = None
 
-NEXT_LAB_DATE = "2026.10.21"
+NEXT_LAB_DATE = "2026.11.04"
 
 def _parse_csv_list(value: str | None, cast_type: Any = str) -> list[Any]:
     if value is None or value == "":
