@@ -202,7 +202,7 @@ def summarize(rows):
 def worker(args):
     args.output_dir = args.output_dir.resolve()
     from isaaclab.app import AppLauncher
-    launcher = AppLauncher(headless=True, device=args.device)
+    launcher = AppLauncher(headless=True, device=args.device, enable_cameras=args.video)
     app = launcher.app
     env = None
     try:
@@ -273,6 +273,9 @@ def worker(args):
         for group in vars(cfg.observations).values():
             if hasattr(group, 'enable_corruption'):
                 group.enable_corruption = False
+        if args.video:
+            # The command's markers are anchor-aligned; Genesis bodies are drawn in the world frame instead.
+            cfg.commands.motion.debug_vis = False
         env = gym.make('Tracking-Flat-G1-DeltaWrench-OpenLoop-v0', cfg=cfg).unwrapped
         wrapped = RslRlVecEnvWrapper(env)
         agent.device = args.device
@@ -330,6 +333,29 @@ def worker(args):
                         body_ang_vel_w=rd.body_link_ang_vel_w[i,bodies].detach().cpu().numpy())
         def target(traj, frame):
             return {k:data[k][traj,frame] for k in STATE_KEYS}
+        video = None
+        if args.video:
+            import imageio.v2 as imageio
+            import isaaclab.sim as sim_utils
+            import omni.replicator.core as rep
+            from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+            genesis_markers = VisualizationMarkers(VisualizationMarkersCfg(prim_path='/Visuals/GenesisBodies', markers={
+                'sphere': sim_utils.SphereCfg(radius=0.035, visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.15, 0.15)))}))
+            rgb = rep.AnnotatorRegistry.get_annotator('rgb', device='cpu')
+            rgb.attach([rep.create.render_product('/OmniverseKit_Persp', (1280, 720))])
+            video = imageio.get_writer(str(out/'replay.mp4'), fps=fps, codec='libx264')
+            origin = env.scene.env_origins[0].cpu().numpy()
+            def capture(traj0, frame, warmup=0):
+                # Logged Genesis bodies at the same frame, world frame (env origin only), no alignment to Isaac.
+                genesis = data['body_pos_w'][traj0, frame] + origin
+                genesis_markers.visualize(translations=torch.as_tensor(genesis, device=args.device, dtype=torch.float32))
+                look = 0.5 * (robot.data.root_pos_w[0].cpu().numpy() + genesis[root])
+                env.sim.set_camera_view((float(look[0] + 2.5), float(look[1] + 2.5), float(look[2] + 0.8)),
+                                        (float(look[0]), float(look[1]), float(look[2])))
+                for _ in range(warmup + 1):
+                    env.sim.render()
+                image = rgb.get_data()
+                video.append_data(np.ascontiguousarray(np.asarray(image)[:, :, :3]))
         env.reset()
         for offset in range(0, len(windows), args.num_envs):
             batch = windows[offset:offset+args.num_envs]
@@ -358,6 +384,8 @@ def worker(args):
             env.scene["contact_forces"].reset(ids)
             env.scene.write_data_to_sim();env.sim.forward();env.scene.update(0.)
             reset_errors=[errors(state(i),target(traj[i],starts[i]),root) for i in range(n)]
+            if video is not None and offset == 0:
+                capture(traj[0], starts[0], warmup=5)
             valid=[max(e['joint_pos_rmse_rad'],e['joint_vel_rmse_rad_s'],e['root_pos_error_m'])<1e-4
                    and e['body_pos_error_m']<1e-3 and e['body_orientation_error_rad']<1e-3
                    and e['body_lin_vel_rmse_m_s']<1e-3 and e['body_ang_vel_rmse_rad_s']<1e-3 for e in reset_errors]
@@ -420,6 +448,8 @@ def worker(args):
                         saved[i].append(actual|{'actions':data['actions'][traj[i],starts[i]+step].copy(),
                                                'wrench':forces[i][-1]})
                 term.time_steps += 1
+                if video is not None and offset == 0 and step < batch[0]['steps']:
+                    capture(traj[0], starts[0]+step+1)
                 if member_policies and any(step + 1 in points for points in sample_points):
                     record_disagreement(probe_ensemble(), step + 1)
             for i,w in enumerate(batch):
@@ -439,6 +469,8 @@ def worker(args):
                 rows.append(row)
                 if args.record_rollouts and good:
                     recording.append((offset+i,saved[i]))
+            if video is not None and offset == 0:
+                video.close()
             (out/'partial_results.json').write_text(json.dumps(rows,indent=2))
             print(f'Evaluated {len(rows)}/{len(windows)} windows',flush=True)
         columns=sorted(set().union(*(r.keys() for r in rows)))
@@ -496,6 +528,9 @@ def main():
     p.add_argument('--trajectory_indices', type=int, nargs='+', help='Subset of recorded trajectories; default all')
     p.add_argument('--max_windows', type=int, help='Evenly subsample the schedule for a smoke test')
     p.add_argument('--record_rollouts', action='store_true')
+    p.add_argument('--video', action='store_true',
+                   help='Render the (single) scheduled window to output_dir/replay.mp4: Isaac robot plus the logged Genesis '
+                        'bodies as red spheres in the world frame (no alignment). Rendering does not change the physics.')
     p.add_argument('--measurement_interval_s', type=float,
                    help='Save instantaneous error curves at nearest control frames, including reset')
     p.add_argument('--zero_delta', action='store_true', help='Replay with zero delta using the supplied checkpoint configuration')
@@ -546,6 +581,8 @@ def main():
             measurement_schedule(float(data['fps'].ravel()[0]), windows[0]['steps'], args.measurement_interval_s)
         except ValueError as exc:
             p.error(str(exc))
+    if args.video and len(windows) != 1:
+        p.error(f'--video renders one window; select exactly one (got {len(windows)}) with --trajectory_indices and --start_frames')
     if args.validate_only:
         print(json.dumps(dict(windows=len(windows), checkpoint=str(args.checkpoint),
                               dataset=str(args.dataset), replay_steps=windows[0]['steps']), indent=2))
@@ -558,7 +595,7 @@ def main():
                     state_timing='pre_action; s[t]+a[t] compared to s[t+1]', seed=args.seed,
                     num_envs=args.num_envs, device=args.device, stride_s=args.stride_s,
                     replay_steps=windows[0]['steps'], replay_length_s=windows[0]['horizon_s'],
-                    zero_delta=args.zero_delta, record_rollouts=args.record_rollouts, status='running')
+                    zero_delta=args.zero_delta, record_rollouts=args.record_rollouts, video=args.video, status='running')
     manifest['measurement_interval_s'] = args.measurement_interval_s
     manifest['ensemble_gate_scales'] = args.ensemble_gate_scales
     manifest['include_zero_baseline'] = args.include_zero_baseline
@@ -577,6 +614,8 @@ def main():
         command.append('--zero_delta')
     if args.record_rollouts:
         command.append('--record_rollouts')
+    if args.video:
+        command.append('--video')
     if args.measurement_interval_s is not None:
         command.extend(['--measurement_interval_s', str(args.measurement_interval_s)])
     if args.ensemble_checkpoints:
