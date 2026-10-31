@@ -59,6 +59,7 @@ def main():
     p.add_argument("--first_frame", type=int, default=0)
     p.add_argument("--num_envs", type=int, default=500)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--experiment_config", type=Path, help="Genesis physical-property overrides (as in eval_sim2sim_genesis.py).")
     p.add_argument("--output", type=Path, required=True)
     args = p.parse_args()
     if args.output.exists():
@@ -75,6 +76,8 @@ def main():
     import eval_sim2sim_genesis as ev
     sys.argv = [sys.argv[0], "--policy_path", str(args.policy_onnx), "--motion_file", str(args.motion_file),
                 "--num_envs", str(args.num_envs), "--no-domain_randomization", "--no-add_noise", "--seed", str(args.seed)]
+    if args.experiment_config:
+        sys.argv += ["--experiment_config", str(args.experiment_config)]
     eargs = ev.parse_args()
     ev.validate_inputs(eargs)  # resolves the default G1 URDF exactly as the evaluator does
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -143,6 +146,7 @@ def main():
     np.savez_compressed(args.output, **payload)
     divergence = np.sqrt(np.mean((out["joint_pos"] - source_cont["joint_pos"]) ** 2, axis=-1))
     report = dict(source=str(args.source), source_kind=args.source_kind, windows=n, horizon_steps=H,
+                  experiment_config=str(args.experiment_config) if args.experiment_config else None,
                   stride_steps=args.stride_steps, num_envs=args.num_envs,
                   reset_error_max={k: float(v.max()) for k, v in reset_err.items()},
                   reset_error_p99={k: float(np.percentile(v, 99)) for k, v in reset_err.items()},
