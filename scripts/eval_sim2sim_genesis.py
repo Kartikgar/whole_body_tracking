@@ -127,6 +127,26 @@ def parse_args() -> argparse.Namespace:
         help="Maximum ankle/wrist vertical tracking error before Genesis termination (Isaac batch profile).",
     )
     parser.add_argument(
+        "--disable_termination",
+        action="store_true",
+        help="Run the full horizon even after a failure (e.g. to film it); only non-finite states still terminate.",
+    )
+    parser.add_argument(
+        "--action_noise_std",
+        type=float,
+        default=0.0,
+        help="Std of Gaussian noise added to the policy's raw actions (pre action_scale) before they are applied, "
+        "logged and fed back as last action; for off-policy data. Drawn from its own RNG, so start states match "
+        "the noise-free run with the same seed.",
+    )
+    parser.add_argument(
+        "--action_noise_tau_s",
+        type=float,
+        default=0.0,
+        help="Correlation time of the action noise (Ornstein-Uhlenbeck, stationary std = --action_noise_std); "
+        "0 = independent per control step.",
+    )
+    parser.add_argument(
         "--add_noise",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -295,6 +315,9 @@ def build_eval_config(args: argparse.Namespace, outputs: OutputTargets) -> EvalC
         seed=args.seed,
         initial_state_npz=args.initial_state_npz,
         endpoint_height_error_tolerance_m=float(args.endpoint_height_error_tolerance_m),
+        disable_termination=bool(args.disable_termination),
+        action_noise_std=float(args.action_noise_std),
+        action_noise_tau_s=float(args.action_noise_tau_s),
         experiment=load_experiment(args.experiment_config),
         policy_type=args.policy_type,
         sonic_model_dir=args.sonic_model_dir,
@@ -352,6 +375,7 @@ def build_runner(config: EvalConfig) -> Sim2SimRunner:
         root_idx=scene.root_idx,
         termination_profile="isaac_batch",
         endpoint_height_error_tolerance_m=config.endpoint_height_error_tolerance_m,
+        disable_termination=config.disable_termination,
     )
     domain_randomizer = DomainRandomizer(
         scene=scene,
@@ -382,6 +406,8 @@ def build_runner(config: EvalConfig) -> Sim2SimRunner:
             "control_dt": np.array([config.control_dt], dtype=np.float32),
             "start_timestep": np.array([config.start_timestep], dtype=np.int32),
             "add_noise": np.array([int(config.add_noise)], dtype=np.int8),
+            "action_noise_std": np.array([config.action_noise_std], dtype=np.float32),
+            "action_noise_tau_s": np.array([config.action_noise_tau_s], dtype=np.float32),
             "domain_randomization": np.array([int(config.domain_randomization)], dtype=np.int8),
             "randomize_startup_qpos": np.array([int(config.randomize_startup_qpos)], dtype=np.int8),
             "startup_qpos_joint_range": np.asarray(config.startup_qpos_joint_range, dtype=np.float32),
@@ -428,8 +454,16 @@ def main() -> None:
         write_json(outputs.output_json, result)
 
     print("\n=== Modular Genesis Sim2Sim Evaluation Summary ===")
+    # Terminal shows scalars only; per-rollout lists, start states and other bulky fields are in the saved JSON.
+    omitted = []
     for key in sorted(result.keys()):
-        print(f"{key}: {result[key]}")
+        value = result[key]
+        if value is None or isinstance(value, (str, bool, int, float, np.generic)):
+            print(f"{key}: {value}")
+        else:
+            omitted.append(key)
+    if omitted:
+        print(f"(non-scalar fields not printed: {', '.join(omitted)})")
     if outputs.output_csv is not None:
         print(f"\nSaved CSV: {outputs.output_csv}")
     if outputs.output_json is not None:

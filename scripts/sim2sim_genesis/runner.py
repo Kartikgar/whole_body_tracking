@@ -47,6 +47,10 @@ class Sim2SimRunner:
         self.domain_randomizer = domain_randomizer
         self.trajectory_recorder = trajectory_recorder
         self.rng = rng if rng is not None else np.random.default_rng(config.seed)
+        # Separate stream so action noise leaves startup randomization (and hence start states) unchanged.
+        self.action_noise_rng = np.random.default_rng([0 if config.seed is None else int(config.seed), 7919])
+        if config.action_noise_std < 0 or config.action_noise_tau_s < 0:
+            raise ValueError("--action_noise_std and --action_noise_tau_s must be >= 0.")
 
         self.obs_dim_expected = self.observation_builder.compute_obs_dim(self.policy.get_obs_input_dim())
         self.start_timestep = int(config.start_timestep)
@@ -63,6 +67,16 @@ class Sim2SimRunner:
         if config.max_steps is not None and int(config.max_steps) != self.max_steps:
             self.max_steps = int(config.max_steps)
             print(f"max_steps: {self.max_steps}")
+
+    def next_action_noise(self, previous: np.ndarray | None, shape: tuple[int, ...]) -> np.ndarray:
+        """Draw the next action-noise sample: i.i.d. Gaussian, or OU with the same stationary std."""
+
+        std, tau = self.config.action_noise_std, self.config.action_noise_tau_s
+        white = self.action_noise_rng.standard_normal(shape).astype(np.float32)
+        if tau <= 0 or previous is None:
+            return std * white
+        decay = float(np.exp(-self.config.control_dt / tau))
+        return (decay * previous + std * np.sqrt(1.0 - decay**2) * white).astype(np.float32)
 
     def reference_for_env(self, reference_batch: dict[str, np.ndarray], env_id: int) -> dict[str, np.ndarray]:
         """Extract a single environment slice from a batched reference payload."""
@@ -170,10 +184,14 @@ class Sim2SimRunner:
             sample_steps = {int(np.floor(t / self.config.control_dt + .5))
                             for t in np.arange(.25, self.max_steps*self.config.control_dt+1e-9,.25)}
 
+            action_noise = None
             for t_step in range(self.max_steps):
                 reference_step = self.start_timestep + t_step
                 policy_output = self.policy.run(observation, reference_step)
                 action_batch = policy_output["actions"].astype(np.float32)
+                if self.config.action_noise_std > 0:
+                    action_noise = self.next_action_noise(action_noise, action_batch.shape)
+                    action_batch = (action_batch + action_noise).astype(np.float32)
                 reference_batch = {
                     "joint_pos": policy_output["joint_pos"].astype(np.float32),
                     "joint_vel": policy_output["joint_vel"].astype(np.float32),
@@ -363,6 +381,8 @@ class Sim2SimRunner:
             "domain_randomization": int(self.config.domain_randomization),
             "randomize_startup_qpos": int(self.config.randomize_startup_qpos),
             "add_noise": int(self.config.add_noise),
+            "action_noise_std": self.config.action_noise_std,
+            "action_noise_tau_s": self.config.action_noise_tau_s,
             "startup_qpos_joint_range_low": self.config.startup_qpos_joint_range[0],
             "startup_qpos_joint_range_high": self.config.startup_qpos_joint_range[1],
             "steps": total_steps,

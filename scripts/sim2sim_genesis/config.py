@@ -64,6 +64,9 @@ class EvalConfig:
     seed: int | None
     initial_state_npz: str | None = None
     endpoint_height_error_tolerance_m: float = 0.25
+    disable_termination: bool = False
+    action_noise_std: float = 0.0
+    action_noise_tau_s: float = 0.0
     experiment: ExperimentConfig | None = None
     policy_type: str = "beyondmimic"
     sonic_model_dir: str | None = None

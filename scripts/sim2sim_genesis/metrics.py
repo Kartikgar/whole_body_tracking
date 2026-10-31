@@ -73,6 +73,7 @@ class TrackingMetricsEvaluator:
     root_idx: int
     termination_profile: str = "legacy"
     endpoint_height_error_tolerance_m: float = 0.25
+    disable_termination: bool = False
 
     def __post_init__(self):
         if self.termination_profile not in ("legacy", "isaac_batch"):
@@ -96,7 +97,8 @@ class TrackingMetricsEvaluator:
                     endpoint_height_error_m=(self.endpoint_height_error_tolerance_m
                                              if self.termination_profile == "isaac_batch" else None),
                     endpoint_names=list(self.endpoint_names) if self.termination_profile == "isaac_batch" else [],
-                    nonfinite_state_check=self.termination_profile == "isaac_batch")
+                    nonfinite_state_check=self.termination_profile == "isaac_batch",
+                    disabled=self.disable_termination)
 
     def compute_body_relative_targets(
         self, state: dict[str, np.ndarray], reference: dict[str, np.ndarray]
@@ -131,6 +133,8 @@ class TrackingMetricsEvaluator:
         if self.termination_profile == "isaac_batch":
             if any(not np.isfinite(value).all() for value in state.values()):
                 return True, "nonfinite_state"
+        if self.disable_termination:
+            return False, "completed"
 
         robot_anchor_pos = state["body_pos_w"][self.anchor_idx]
         robot_anchor_quat = state["body_quat_w"][self.anchor_idx]
