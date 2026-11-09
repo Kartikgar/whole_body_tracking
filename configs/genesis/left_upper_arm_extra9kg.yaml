@@ -1,0 +1,6 @@
+# All fields are optional. Values replace existing properties, not multipliers.
+# Scenario: 9 kg payload on one upper arm (asymmetric arm load), placed high on the arm.
+link_masses_kg:
+  # Nominal 0.643 kg + 9 kg payload. Genesis keeps the link CoM unchanged: 0.064 m below the shoulder-roll joint,
+  # about 0.09 m from the shoulder-pitch joint (upper arm, near the shoulder; the elbow is about 0.20 m away).
+  left_shoulder_roll_link: 9.643

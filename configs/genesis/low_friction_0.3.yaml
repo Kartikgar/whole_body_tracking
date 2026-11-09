@@ -1,0 +1,5 @@
+# All fields are optional. Values replace existing properties, not multipliers.
+# Scenario: very low floor friction (nominal G1 coefficient 1.0), no payload.
+# Genesis uses max(ground, robot) friction per contact (floored at 0.01), so both must be lowered.
+ground_friction: 0.3
+robot_friction: 0.3  # All robot collision geometries; also overrides the startup friction-ratio randomization.

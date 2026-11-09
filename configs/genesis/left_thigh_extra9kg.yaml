@@ -1,0 +1,6 @@
+# All fields are optional. Values replace existing properties, not multipliers.
+# Scenario: 9 kg payload on one thigh (asymmetric leg load), placed high on the thigh.
+link_masses_kg:
+  # Nominal 1.52 kg + 10 kg payload. Genesis keeps the link CoM unchanged: 0.093 m below the hip-roll joint,
+  # about 0.13 m from the hip-pitch joint (upper thigh, near the hip; the knee is about 0.34 m away).
+  left_hip_roll_link: 10.52
