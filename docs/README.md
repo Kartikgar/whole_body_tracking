@@ -28,6 +28,7 @@ This project studies G1 humanoid motion tracking and whether learned residual dy
 - [Week of 2026.10.21](research_log/2026.10.21.md): m1_m2_m3 and m1_m2_m3_m4 pelvis-wrench deltas both transfer to m4 after 20 finetuning iterations.
 - [Week of 2026.10.28](research_log/2026.10.28.md): torso-payload pelvis-wrench delta, gap-model gating; best finetune λ = 1.0 without randomization.
 - [Week of 2026.11.04](research_log/2026.11.04.md): data-scale study; a delta from 100 episodes still transfers to m4 after finetuning.
+- [Week of 2026.11.11](research_log/2026.11.11.md): limb payloads; with a 10 kg arm payload, a pelvis-wrench delta finetune lifts m4 completion from 72.6% to 91.0%, where DR-only finetuning does not.
 
 ## Detailed visual references
 
