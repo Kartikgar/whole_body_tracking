@@ -1,0 +1,4 @@
+# All fields are optional. Values replace existing properties, not multipliers.
+# Scenario: 13 kg payload on the pelvis.
+link_masses_kg:
+  pelvis: 16.813  # Nominal 3.813 kg + 13 kg payload; Genesis keeps the pelvis CoM unchanged.
