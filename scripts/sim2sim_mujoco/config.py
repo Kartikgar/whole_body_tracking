@@ -6,15 +6,18 @@ import os
 from dataclasses import dataclass
 
 from sim2sim_genesis.config import default_eval_artifact_path
+from sim2sim_mujoco.domain_randomization import MujocoDRConfig
 
 
 @dataclass(slots=True)
 class MujocoEvalConfig:
-    """Normalized options for one MuJoCo rollout."""
+    """Normalized options for one batched MuJoCo evaluation."""
 
     policy_path: str
     xml_file: str
     policy_device: str
+    num_envs: int
+    num_threads: int | None
     sim_dt: float
     control_dt: float
     start_timestep: int
@@ -22,6 +25,7 @@ class MujocoEvalConfig:
     torque_limit: float | None
     compute_metrics: bool
     record_video: bool
+    video_env_ids: list[int] | None
     show_reference: bool
     reference_marker_radius: float
     video_width: int
@@ -29,6 +33,11 @@ class MujocoEvalConfig:
     video_name: str | None
     output_json: str
     seed: int | None
+    domain_randomization: bool
+    dr: MujocoDRConfig
+    randomize_startup_qpos: bool
+    startup_qpos_joint_range: tuple[float, float]
+    disable_termination: bool
 
 
 def append_timestamp_to_path(path: str, timestamp: str) -> str:
@@ -40,14 +49,10 @@ def append_timestamp_to_path(path: str, timestamp: str) -> str:
 
 
 def default_json_path(run_timestamp: str, policy_path: str) -> str:
-    """Return the default MuJoCo JSON artifact path."""
-
     return default_eval_artifact_path(run_timestamp, _artifact_policy_path(policy_path), ".json")
 
 
 def default_video_path(run_timestamp: str, policy_path: str) -> str:
-    """Return the default MuJoCo MP4 artifact path."""
-
     return default_eval_artifact_path(run_timestamp, _artifact_policy_path(policy_path), ".mp4")
 
 
@@ -59,6 +64,4 @@ def _artifact_policy_path(policy_path: str) -> str:
         relative = os.path.relpath(abs_path, os.getcwd())
     except ValueError:
         return policy_path
-    if relative.startswith(".."):
-        return policy_path
-    return relative
+    return policy_path if relative.startswith("..") else relative
