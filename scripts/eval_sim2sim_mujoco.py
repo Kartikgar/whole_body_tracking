@@ -21,7 +21,9 @@ from sim2sim_mujoco.constants import (
     DEFAULT_VIDEO_HEIGHT,
     DEFAULT_VIDEO_WIDTH,
 )
+from sim2sim_genesis.constants import DEFAULT_STARTUP_QPOS_JOINT_RANGE
 from sim2sim_mujoco.control import MujocoPdController
+from sim2sim_mujoco.domain_randomization import MujocoDomainRandomizer, MujocoDRConfig
 from sim2sim_mujoco.runner import MujocoSim2SimRunner
 from sim2sim_mujoco.scene import MujocoSceneAdapter
 
@@ -42,12 +44,13 @@ def write_json(path: str, row: dict[str, object]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Single-env MuJoCo sim2sim evaluator for G1 ONNX policies.")
+    parser = argparse.ArgumentParser(description="Batched MuJoCo sim2sim evaluator for G1 ONNX policies.")
     parser.add_argument("--policy_path", type=str, required=True, help="Path to exported ONNX policy.")
     parser.add_argument("--xml_file", type=str, default=DEFAULT_G1_MJCF, help="Path to MuJoCo MJCF XML.")
     parser.add_argument("--policy_device", type=str, default="cpu", help="ONNX Runtime device hint.")
     parser.add_argument("--device", dest="policy_device", help="Alias for --policy_device.")
-    parser.add_argument("--num_envs", type=int, default=1, help="Must be 1 for MuJoCo v0.")
+    parser.add_argument("--num_envs", type=int, default=1, help="Parallel envs (one rollout each).")
+    parser.add_argument("--num_threads", type=int, default=None, help="Stepping threads (default: min(num_envs, CPUs)).")
     parser.add_argument("--sim_dt", type=float, default=0.001, help="MuJoCo simulation timestep.")
     parser.add_argument("--control_dt", type=float, default=0.02, help="Policy control timestep.")
     parser.add_argument("--start_timestep", type=int, default=0, help="Reference-motion start timestep.")
@@ -55,6 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--torque_limit", type=float, default=None, help="Optional symmetric torque clip.")
     parser.add_argument("--compute_metrics", action="store_true", help="Compute MPJPE/velocity/acceleration metrics.")
     parser.add_argument("--record_video", action="store_true", help="Record an MP4 rollout video.")
+    parser.add_argument("--video_env_ids", type=int, nargs="+", default=None,
+                        help="Envs to record (one MP4 each, suffix _env<id>); default env 0.")
     parser.add_argument("--show_reference", action="store_true", help="Draw reference body markers in recorded video.")
     parser.add_argument(
         "--reference_marker_radius",
@@ -67,12 +72,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video_name", type=str, default=None, help="Optional output MP4 path.")
     parser.add_argument("--output_json", type=str, default=None, help="Optional output JSON path.")
     parser.add_argument("--seed", type=int, default=None, help="Optional deterministic seed.")
+    parser.add_argument("--domain_randomization", action=argparse.BooleanOptionalAction, default=False,
+                        help="Per-env generic DR: friction, link mass scale, kp/kd scale, torso CoM shift, pushes.")
+    parser.add_argument("--dr_friction_range", type=float, nargs=2, default=list(MujocoDRConfig().friction_range))
+    parser.add_argument("--dr_mass_scale_range", type=float, nargs=2, default=list(MujocoDRConfig().mass_scale_range))
+    parser.add_argument("--dr_kp_kd_scale_range", type=float, nargs=2, default=list(MujocoDRConfig().kp_kd_scale_range))
+    parser.add_argument("--dr_pushes", action=argparse.BooleanOptionalAction, default=True, help="Interval pushes when DR is on.")
+    parser.add_argument("--randomize_startup_qpos", action=argparse.BooleanOptionalAction, default=False,
+                        help="Uniform per-env joint noise at reset.")
+    parser.add_argument("--startup_qpos_joint_range", type=float, nargs=2, default=list(DEFAULT_STARTUP_QPOS_JOINT_RANGE))
+    parser.add_argument("--disable_termination", action="store_true", help="Run the full horizon even after a failure.")
     return parser.parse_args()
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if args.num_envs != 1:
-        raise ValueError(f"MuJoCo v0 supports exactly one env. Got --num_envs {args.num_envs}.")
+    if args.num_envs < 1:
+        raise ValueError(f"--num_envs must be >= 1. Got {args.num_envs}.")
     if not os.path.isfile(args.policy_path):
         raise FileNotFoundError(f"Policy not found: {args.policy_path}")
     if not os.path.isfile(args.xml_file):
@@ -98,6 +113,8 @@ def build_config(args: argparse.Namespace, run_timestamp: str) -> MujocoEvalConf
         policy_path=os.path.abspath(args.policy_path),
         xml_file=os.path.abspath(args.xml_file),
         policy_device=args.policy_device,
+        num_envs=int(args.num_envs),
+        num_threads=args.num_threads,
         sim_dt=float(args.sim_dt),
         control_dt=float(args.control_dt),
         start_timestep=int(args.start_timestep),
@@ -105,6 +122,7 @@ def build_config(args: argparse.Namespace, run_timestamp: str) -> MujocoEvalConf
         torque_limit=args.torque_limit,
         compute_metrics=bool(args.compute_metrics),
         record_video=bool(args.record_video),
+        video_env_ids=args.video_env_ids,
         show_reference=bool(args.show_reference),
         reference_marker_radius=float(args.reference_marker_radius),
         video_width=int(args.video_width),
@@ -112,6 +130,12 @@ def build_config(args: argparse.Namespace, run_timestamp: str) -> MujocoEvalConf
         video_name=video_name,
         output_json=output_json,
         seed=args.seed,
+        domain_randomization=bool(args.domain_randomization),
+        dr=MujocoDRConfig(friction_range=tuple(args.dr_friction_range), mass_scale_range=tuple(args.dr_mass_scale_range),
+                          kp_kd_scale_range=tuple(args.dr_kp_kd_scale_range), pushes=bool(args.dr_pushes)),
+        randomize_startup_qpos=bool(args.randomize_startup_qpos),
+        startup_qpos_joint_range=tuple(args.startup_qpos_joint_range),
+        disable_termination=bool(args.disable_termination),
     )
 
 
@@ -127,43 +151,45 @@ def build_runner(config: MujocoEvalConfig) -> MujocoSim2SimRunner:
         )
 
     observation_builder = ObservationBuilder(
-        policy.meta,
-        num_envs=1,
-        add_noise=False,
-        rng=rng,
-        motion_file=None,
-    )
+        policy.meta, num_envs=config.num_envs, add_noise=False, rng=rng, motion_file=None)
     scene = MujocoSceneAdapter(
         xml_file=config.xml_file,
         sim_dt=config.sim_dt,
+        control_dt=config.control_dt,
         meta_body_names=policy.meta.body_names,
         joint_names=policy.meta.joint_names,
         anchor_body_name=policy.meta.anchor_body_name,
+        joint_stiffness=policy.meta.joint_stiffness,
+        joint_damping=policy.meta.joint_damping,
+        num_envs=config.num_envs,
+        num_threads=config.num_threads,
+        torque_limit=config.torque_limit,
         record_video=config.record_video,
+        video_env_ids=config.video_env_ids,
         show_reference=config.show_reference,
         reference_marker_radius=config.reference_marker_radius,
         width=config.video_width,
         height=config.video_height,
     )
-    controller = MujocoPdController(
-        scene=scene,
-        meta=policy.meta,
-        control_dt=config.control_dt,
-        sim_dt=config.sim_dt,
-        torque_limit=config.torque_limit,
-    )
+    # Same termination rule as the Genesis evaluator (Isaac batch profile).
     metrics_evaluator = TrackingMetricsEvaluator(
-        body_names=policy.meta.body_names,
+        body_names=list(policy.meta.body_names),
         anchor_idx=scene.anchor_idx,
         root_idx=scene.root_idx,
+        termination_profile="isaac_batch",
+        disable_termination=config.disable_termination,
     )
+    domain_randomizer = (MujocoDomainRandomizer(scene, rng, config.control_dt, config.dr)
+                         if config.domain_randomization else None)
     return MujocoSim2SimRunner(
         config=config,
         policy=policy,
         scene=scene,
         observation_builder=observation_builder,
-        controller=controller,
+        controller=MujocoPdController(meta=policy.meta),
         metrics_evaluator=metrics_evaluator,
+        domain_randomizer=domain_randomizer,
+        rng=rng,
     )
 
 
@@ -181,10 +207,11 @@ def main() -> None:
 
     print("\n=== MuJoCo Sim2Sim Evaluation Summary ===")
     for key in sorted(result.keys()):
-        print(f"{key}: {result[key]}")
+        if key not in ("rollout_metrics", "domain_randomization_config", "termination_definition"):
+            print(f"{key}: {result[key]}")
     print(f"\nSaved JSON: {config.output_json}")
-    if "video_path" in result:
-        print(f"Saved video: {result['video_path']}")
+    for path in result.get("video_path") or []:
+        print(f"Saved video: {path}")
 
 
 if __name__ == "__main__":
