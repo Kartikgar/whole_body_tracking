@@ -68,6 +68,9 @@ class GenesisSceneAdapter:
         domain_randomization: bool,
         seed: int | None = None,
         sonic_spec: Any | None = None,
+        camera_eye_offset: tuple[float, float, float] | None = None,
+        camera_lookat_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        camera_fov: float = 45.0,
     ):
         """Initialize Genesis and build the G1 scene for evaluation."""
 
@@ -93,6 +96,11 @@ class GenesisSceneAdapter:
         self.domain_randomization = bool(domain_randomization)
         self.seed = seed
         self.sonic_spec = sonic_spec
+        # Optional follow camera: eye = root + camera_eye_offset, lookat = root + camera_lookat_offset (all 3 axes track the
+        # root, like Isaac Lab's ViewerCfg(origin_type="asset_root")). None keeps the legacy camera below.
+        self.camera_eye_offset = None if camera_eye_offset is None else tuple(float(v) for v in camera_eye_offset)
+        self.camera_lookat_offset = tuple(float(v) for v in camera_lookat_offset)
+        self.camera_fov = float(camera_fov)
 
         gs_backend = gs.gpu if backend == "gpu" else gs.cpu
         if seed is not None:
@@ -142,7 +150,7 @@ class GenesisSceneAdapter:
                 res=(1280, 720),
                 pos=(0.0, 3.0, 2.0),
                 lookat=(0.0, 0.0, 0.8),
-                fov=45,
+                fov=self.camera_fov,
                 GUI=False,
             )
 
@@ -233,10 +241,15 @@ class GenesisSceneAdapter:
         if self.camera is None:
             return
 
-        self.camera.set_pose(
-            pos=(float(root_position[0]), float(root_position[1] + 2.5), 1.6),
-            lookat=(float(root_position[0]), float(root_position[1]), float(root_position[2] + 0.2)),
-        )
+        if self.camera_eye_offset is not None:
+            root = [float(v) for v in root_position]
+            self.camera.set_pose(pos=tuple(r + o for r, o in zip(root, self.camera_eye_offset)),
+                                 lookat=tuple(r + o for r, o in zip(root, self.camera_lookat_offset)))
+        else:
+            self.camera.set_pose(
+                pos=(float(root_position[0]), float(root_position[1] + 2.5), 1.6),
+                lookat=(float(root_position[0]), float(root_position[1]), float(root_position[2] + 0.2)),
+            )
         self.camera.render()
 
     def reset_to_reference(

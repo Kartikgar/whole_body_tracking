@@ -71,6 +71,9 @@ class EvalConfig:
     policy_type: str = "beyondmimic"
     sonic_model_dir: str | None = None
     trajectory_index: int = 0
+    camera_eye_offset: tuple[float, float, float] | None = None
+    camera_lookat_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    camera_fov: float = 45.0
 
 
 @dataclass(slots=True)

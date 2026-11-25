@@ -181,6 +181,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None, help="Optional global seed for evaluation.")
     parser.add_argument("--initial_state_npz", help="Initialize each environment from initial_* fields of a logged NPZ; uses its already randomized states without adding startup noise again.")
     parser.add_argument("--show_reference", action="store_true", help="Visualize reference body markers.")
+    parser.add_argument("--camera_eye_offset", type=float, nargs=3, default=None,
+                        help="Follow-camera eye offset from the robot root (x y z, m); default: legacy camera.")
+    parser.add_argument("--camera_lookat_offset", type=float, nargs=3, default=[0.0, 0.0, 0.0],
+                        help="Follow-camera look-at offset from the robot root (x y z, m); used with --camera_eye_offset.")
+    parser.add_argument("--camera_fov", type=float, default=45.0, help="Video camera vertical field of view (deg).")
     parser.add_argument(
         "--reference_marker_radius",
         type=float,
@@ -302,6 +307,9 @@ def build_eval_config(args: argparse.Namespace, outputs: OutputTargets) -> EvalC
         viewer=bool(args.viewer),
         show_reference=bool(args.show_reference),
         reference_marker_radius=float(args.reference_marker_radius),
+        camera_eye_offset=None if args.camera_eye_offset is None else tuple(args.camera_eye_offset),
+        camera_lookat_offset=tuple(args.camera_lookat_offset),
+        camera_fov=float(args.camera_fov),
         add_noise=bool(args.add_noise),
         domain_randomization=bool(args.domain_randomization),
         randomize_startup_qpos=bool(args.randomize_startup_qpos),
@@ -352,6 +360,9 @@ def build_runner(config: EvalConfig) -> Sim2SimRunner:
         record_video=config.record_video,
         show_reference=config.show_reference,
         reference_marker_radius=config.reference_marker_radius,
+        camera_eye_offset=config.camera_eye_offset,
+        camera_lookat_offset=config.camera_lookat_offset,
+        camera_fov=config.camera_fov,
         urdf_file=config.urdf_file,
         xml_file=config.xml_file,
         meta_body_names=policy.meta.body_names,
