@@ -105,13 +105,57 @@ def _joint_q(robot: Humanoid, values: dict[str, float], root_z: float = 0.0) -> 
     return q
 
 
-def load_sprout(with_collision: bool = True) -> Humanoid:
+# ---------------------------------------------------------------------------
+# Self-collision pairs (left side; mirrored), in the style of frax's G1 table. Without them
+# walk1_subject1 had leg-leg interpenetration in 24% of frames (up to 8 cm: Sprout's legs are
+# thick for their length) and forearm/hand-in-torso in 77% (Sprout's torso is wide).
+# Neighbouring links that always touch are left out.
+# ---------------------------------------------------------------------------
+_LEG = ("femur_upper", "femur_lower", "tibia", "foot")  # hip roll, hip yaw, knee, ankle children
+_FOREARM = ("radius", "wrist", "gripper_lower", "gripper_upper")
+_THIGH = ("femur_upper", "femur_lower")
+
+
+def _side(side: str, names) -> list[str]:
+    return [f"{side}_{n}_link" for n in names]
+
+
+def _mirror(link: str) -> str:
+    for a, b in (("left_", "right_"), ("right_", "left_")):
+        if link.startswith(a):
+            return b + link[len(a):]
+    return link
+
+
+_LEFT_SC_PAIRS = (
+    [(a, b) for a in _side("left", _LEG) for b in _side("right", _LEG)]
+    + [(a, b) for a in _side("left", _FOREARM) for b in ("torso_link", "pelvis_link")]
+    + [(a, b) for a in _side("left", _FOREARM) for b in _side("left", _THIGH) + _side("right", _THIGH)]
+    + [(a, b) for a in _side("left", _FOREARM) for b in _side("right", ("humerus_lower",) + _FOREARM)]
+)
+SELF_COLLISION_LINK_PAIRS = tuple(dict.fromkeys(
+    tuple(sorted(p)) for a, b in _LEFT_SC_PAIRS for p in ((a, b), (_mirror(a), _mirror(b)))
+))  # fmt: skip
+SELF_COLLISION_ROWS = 64  # closest sphere pairs kept per QP step (frax's G1 value)
+SELF_COLLISION_MARGIN = 0.005  # m
+# Map the human's neutral stance (feet under the hips) to Sprout's (hip roll 0, feet ~24 cm apart):
+# each foot target is moved outward along the human hip axis by half the width difference.
+STANCE_WIDEN = True
+
+
+def sprout_sc_data() -> tuple:
+    from frax.utils.collision_utils import link_pairs_to_sc_data
+
+    return link_pairs_to_sc_data(COLLISION_MODEL, SELF_COLLISION_LINK_PAIRS)
+
+
+def load_sprout(with_collision: bool = True, self_collision: bool = True) -> Humanoid:
     """Sprout with a quaternion floating base, standing on the floor with arms in the reference pose."""
     collision = None
     if with_collision:
         collision = bubblify_to_mine(
-            COLLISION_MODEL, dict(JOINT_TO_CHILD), root_link_name=ROOT_LINK,
-            add_floating_base=True, sc_data=None, verbose=False,
+            COLLISION_MODEL, dict(JOINT_TO_CHILD), root_link_name=ROOT_LINK, add_floating_base=True,
+            sc_data=sprout_sc_data() if self_collision else None, verbose=False,
         )
     robot = Humanoid(
         SPROUT_URDF,
@@ -200,6 +244,7 @@ def _geometry(robot: Humanoid) -> dict:
     )
     pelvis = T[robot.joint_name_to_index["waist_yaw_joint"]]
     pelvis_offset = pelvis[:3, :3].T @ (pelvis[:3, 3] - hip_center)
+    stance_width = float(np.linalg.norm(p("left_ankle_joint") - p("right_ankle_joint")))  # legs at zero
 
     g1 = load_g1()
     T_g1 = np.asarray(g1.joint_to_world_transforms(np.asarray(g1.default_configuration)))
@@ -211,6 +256,7 @@ def _geometry(robot: Humanoid) -> dict:
         offsets.append(off_g1 @ R_g1.T @ R_s)
     return {
         "leg": leg, "upper": upper, "pelvis_offset": pelvis_offset, "rot_offsets": np.stack(offsets),
+        "stance_width": stance_width,
     }
 
 
@@ -219,10 +265,14 @@ def make_retargeter(
     floor: bool = True,
     v_max: float | None = RETARGET_V_MAX,
     hip_yaw_damping: float = HIP_YAW_DAMPING,
+    self_collision: bool = True,
+    stance_widen: bool = STANCE_WIDEN,
 ) -> tuple[Retargeter, dict]:
     """Human bone poses (n, 7), in LAFAN1_BONES order -> Sprout configuration.
 
-    v_max: uniform joint velocity cap (rad/s); None = the URDF's (5 rad/s placeholder)."""
+    v_max: uniform joint velocity cap (rad/s); None = the URDF's (5 rad/s placeholder).
+    self_collision: keep SELF_COLLISION_LINK_PAIRS apart (needs load_sprout(self_collision=True)).
+    stance_widen: move the foot targets outward to Sprout's neutral stance width (STANCE_WIDEN)."""
     geo = _geometry(robot)
     leg_scale = geo["leg"] / LAFAN1_LEG
     upper_scale = geo["upper"] / LAFAN1_UPPER
@@ -231,6 +281,7 @@ def make_retargeter(
     pelvis_offset = geo["pelvis_offset"]
     hips_idx = np.array([LAFAN1_BONES.index(b) for b in ("LeftUpLeg", "RightUpLeg")])
     feet_idx = np.array([LAFAN1_BONES.index(b) for b in ("LeftFootMod", "RightFootMod")])
+    stance_width = geo["stance_width"]
 
     def preprocess(human_poses: Array) -> dict:
         pos = human_poses[:, :3]
@@ -238,7 +289,14 @@ def make_retargeter(
         hips = jnp.mean(pos[hips_idx], axis=0)
         targets = leg_scale * hips + upper_scale * (pos - hips)
         targets = targets.at[0].set(leg_scale * hips + rmats[0] @ pelvis_offset)
-        targets = targets.at[feet_idx].set(leg_scale * pos[feet_idx])
+        feet = leg_scale * pos[feet_idx]
+        if stance_widen:
+            axis = (pos[hips_idx[0]] - pos[hips_idx[1]]).at[2].set(0.0)  # right hip -> left hip, horizontal
+            width = jnp.linalg.norm(axis)
+            widen = 0.5 * jnp.maximum(stance_width - leg_scale * width, 0.0)
+            shift = widen * axis / jnp.maximum(width, 1e-6)
+            feet = feet + jnp.stack((shift, -shift))
+        targets = targets.at[feet_idx].set(feet)
         return {"frame_pos": targets - floor_offset, "frame_rmat": rmats}
 
     def initial_q(human_poses: Array) -> Array:
@@ -259,6 +317,12 @@ def make_retargeter(
     constraints = [JointLimits(robot, q_min=q_min, q_max=q_max, v_max=v_lim)]
     if floor:
         constraints.append(FloorConstraint(robot, gain=GAIN))
+    if self_collision:
+        from frax.ik import SelfCollisionConstraint
+
+        constraints.append(SelfCollisionConstraint(
+            robot, max_rows=SELF_COLLISION_ROWS, gain=GAIN, margin=SELF_COLLISION_MARGIN,
+        ))  # fmt: skip
     reg = np.full(robot.nv, DAMPING)
     for joints, value in (
         (SHOULDER_JOINTS, SHOULDER_DAMPING),
@@ -271,6 +335,7 @@ def make_retargeter(
         "leg_scale": leg_scale, "upper_scale": upper_scale, "floor_offset": floor_offset,
         "pelvis_offset": pelvis_offset, "ankle_height": ANKLE_HEIGHT, "leg": geo["leg"], "upper": geo["upper"],
         "v_max": v_max, "hip_yaw_damping": hip_yaw_damping,
+        "self_collision": self_collision, "stance_widen": stance_widen, "stance_width": stance_width,
     }
     return Retargeter(solver, preprocess, initial_q), info
 

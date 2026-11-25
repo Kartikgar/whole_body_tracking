@@ -1,6 +1,7 @@
-"""Play retargeted Sprout clips in a viser viewer (frax env).
+"""Play retargeted Sprout (or Unitree G1) clips in a viser viewer (frax env).
 
     python scripts/sprout/retarget/view_sprout.py [--results-dir data/lafan1_frax/sprout] [--port 8080]
+    python scripts/sprout/retarget/view_sprout.py --robot g1    # G1 LAFAN1 clips from g1_csv_to_npz.py
 
 Open http://localhost:<port>. Optional: --source shows the scaled LAFAN1 targets as dots.
 """
@@ -52,7 +53,28 @@ def load_textured_urdf(flat_color: bool):
     return urdf
 
 
+BLINKMIMIC_DATA = Path(__file__).resolve().parents[4] / "blinkmimic/data"
+G1_URDF = BLINKMIMIC_DATA / "g1_description/g1_29dof_rev_1_0.urdf"
+G1_CLIPS = BLINKMIMIC_DATA / "lafan1_g1_npz"  # from scripts/blinkmimic/g1_csv_to_npz.py
+
+
+def load_g1_urdf():
+    """Unitree G1 29-DoF URDF (root link: pelvis); meshes resolved relative to the URDF."""
+    from functools import partial
+
+    import yourdfpy
+
+    return yourdfpy.URDF.load(
+        G1_URDF, build_scene_graph=True, load_meshes=True,
+        filename_handler=partial(yourdfpy.filename_handler_magic, dir=G1_URDF.parent),
+    )  # fmt: skip
+
+
 def main(args) -> None:
+    if args.results_dir is None:
+        args.results_dir = str(G1_CLIPS if args.robot == "g1" else S.OUT_DIR)
+    if args.robot == "g1" and args.source:
+        raise SystemExit("--source (LAFAN1 target overlay) is only available for --robot sprout")
     paths = sorted(Path(args.results_dir).glob("*.npz"))
     assert paths, f"No .npz files in {args.results_dir}"
     clips = {p.stem: p for p in paths}
@@ -61,7 +83,8 @@ def main(args) -> None:
     server = viser.ViserServer(port=args.port)
     server.scene.add_grid("/grid", width=6.0, height=6.0)
     root = server.scene.add_frame("/robot", show_axes=False)
-    urdf_viz = ViserUrdf(server, load_textured_urdf(args.flat_color), root_node_name="/robot")
+    urdf = load_g1_urdf() if args.robot == "g1" else load_textured_urdf(args.flat_color)
+    urdf_viz = ViserUrdf(server, urdf, root_node_name="/robot")
     viz_names = list(urdf_viz.get_actuated_joint_names())
     to_viz = None
 
@@ -80,9 +103,11 @@ def main(args) -> None:
     qs, targets = None, None
 
     def load(_=None):
-        nonlocal qs, to_viz, targets
+        nonlocal qs, to_viz, targets, dt
         data = np.load(clips[clip_dropdown.value])
         qs = data["q"]
+        if "fps" in data.files:
+            dt = 1.0 / float(data["fps"])
         names = [str(n) for n in data["joint_names"]]
         to_viz = np.array([names.index(n) for n in viz_names])
         if retargeter is not None:
@@ -114,7 +139,8 @@ def main(args) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--results-dir", default=str(S.OUT_DIR))
+    ap.add_argument("--robot", choices=("sprout", "g1"), default="sprout")
+    ap.add_argument("--results-dir", default=None, help="default: Sprout frax clips, or blinkmimic/data/lafan1_g1_npz for g1")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--source", action="store_true", help="overlay the scaled LAFAN1 targets")
     ap.add_argument("--flat-color", action="store_true", help="plain grey meshes instead of the texture")

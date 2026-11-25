@@ -18,6 +18,9 @@ Metrics (per clip):
                                        2 cm of the floor (foot skating)
     limit_frac                         fraction of joint samples within 0.02 rad of a limit
     spike_frames                       frames where any joint moves > 15 rad/s (IK flips)
+    leg_collision_frac                 fraction of frames where the left and right legs interpenetrate
+    self_collision_frac                same, over all SELF_COLLISION_LINK_PAIRS (legs, forearms vs torso/thighs/arms)
+    self_collision_min_cm              deepest interpenetration over the clip (negative = penetration)
 """
 
 from __future__ import annotations
@@ -57,8 +60,9 @@ SPIKE_RAD_S = 15.0  # a joint moving faster than this between frames is treated 
 load_clip = S.load_clip  # module-level name so the spawn-based process pool can pickle it
 
 
-def clip_metrics(robot, retargeter, frames: np.ndarray, q: np.ndarray, fk, coll, lo, hi) -> dict:
+def clip_metrics(robot, retargeter, frames: np.ndarray, q: np.ndarray, fk, coll, lo, hi, scd, leg_pairs) -> dict:
     T = np.asarray(fk(jnp.asarray(q)))  # (T, nv, 4, 4)
+    D = np.asarray(scd(jnp.asarray(q)))  # (T, sphere pairs) self-collision distances
     ref = jax.vmap(retargeter.preprocess)(jnp.asarray(frames))
     tracked = np.array([robot.joint_name_to_index[n] for n in S.SPROUT_TRACKED_JOINTS])
     err = np.linalg.norm(T[:, tracked][..., :3, 3] - np.asarray(ref["frame_pos"]), axis=-1)  # (T, n)
@@ -90,6 +94,9 @@ def clip_metrics(robot, retargeter, frames: np.ndarray, q: np.ndarray, fk, coll,
         "contact_slide_cm_s": 100 * float(np.concatenate(slide).mean()) if slide else float("nan"),
         "limit_frac": float(near.mean()),
         "spike_frames": int((qd > SPIKE_RAD_S).any(axis=1).sum()),
+        "leg_collision_frac": float((D[:, leg_pairs] < 0).any(axis=1).mean()),
+        "self_collision_frac": float((D < 0).any(axis=1).mean()),
+        "self_collision_min_cm": 100 * float(D.min()),
     }
 
 
@@ -107,7 +114,8 @@ def main(args) -> None:
     robot = S.load_sprout()
     v_max = None if args.v_max <= 0 else args.v_max
     retargeter, info = S.make_retargeter(
-        robot, floor=not args.no_floor, v_max=v_max, hip_yaw_damping=args.hip_yaw_damping
+        robot, floor=not args.no_floor, v_max=v_max, hip_yaw_damping=args.hip_yaw_damping,
+        self_collision=not args.no_self_collision, stance_widen=not args.no_stance_widen,
     )
     offline = OfflineRetargeter(retargeter, 1.0 / S.LAFAN1_FPS)
     t0 = time.perf_counter()
@@ -126,13 +134,16 @@ def main(args) -> None:
         link: (np.array([s["center"] for s in spheres[link]]), np.array([s["radius"] for s in spheres[link]]))
         for link in ("left_foot_link", "right_foot_link")
     }
+    scd = jax.jit(jax.vmap(robot.self_collision_distances))
+    leg_links = {f"{s}_{n}_link" for s in ("left", "right") for n in S._LEG}
+    leg_pairs = np.array([a in leg_links and b in leg_links for a, _, b, _, _ in S.sprout_sc_data()])
     lo = np.asarray(robot.actuated_joint_lower_limits)
     hi = np.asarray(robot.actuated_joint_upper_limits)
     rows = []
     t0 = time.perf_counter()
     for path, frames, q in zip(paths, clips, qs):
         np.savez(out / f"{path.stem}.npz", q=q, fps=S.LAFAN1_FPS, joint_names=np.array(S.JOINT_ORDERING))
-        rows.append({"clip": path.stem, **clip_metrics(robot, retargeter, frames, q, fk, coll, lo, hi)})
+        rows.append({"clip": path.stem, **clip_metrics(robot, retargeter, frames, q, fk, coll, lo, hi, scd, leg_pairs)})
     print(f"Saved + scored in {time.perf_counter() - t0:.1f} s -> {out}")
 
     with open(out / "metrics.csv", "w", newline="") as f:
@@ -153,10 +164,13 @@ def main(args) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default=str(S.LAFAN1_DIR))
-    ap.add_argument("--out-dir", default=str(S.OUT_DIR))
+    ap.add_argument("--out-dir", default=str(S.OUT_DIR.parent / "sprout_v2"),
+                    help="default data/lafan1_frax/sprout_v2 (data/lafan1_frax/sprout is the original run)")
     ap.add_argument("--clips", nargs="*", help="clip stems (default: all)")
     ap.add_argument("--no-floor", action="store_true", help="disable the floor constraint")
     ap.add_argument("--v-max", type=float, default=S.RETARGET_V_MAX,
                     help="joint velocity cap in rad/s; <= 0 uses the URDF's 5 rad/s placeholder")
     ap.add_argument("--hip-yaw-damping", type=float, default=S.HIP_YAW_DAMPING)
+    ap.add_argument("--no-self-collision", action="store_true", help="disable the self-collision constraint")
+    ap.add_argument("--no-stance-widen", action="store_true", help="keep the human foot spacing (scaled)")
     main(ap.parse_args())
