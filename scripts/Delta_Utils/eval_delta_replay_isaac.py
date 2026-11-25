@@ -293,6 +293,15 @@ def worker(args):
                 raise ValueError('Recurrent ensemble members are not supported')
             member_runners.append(loaded)
             member_policies.append(loaded.get_inference_policy(device=args.device))
+        gap_model = gap_columns = None
+        if args.gap_model_checkpoint is not None:
+            from whole_body_tracking.utils.gap_model import GapEnsemble, gap_model_obs_columns
+            om = env.observation_manager
+            gap_model = GapEnsemble.load(args.gap_model_checkpoint, map_location=args.device).to(args.device)
+            gap_columns = torch.as_tensor(gap_model_obs_columns(
+                om.active_terms['policy'], [int(np.prod(d)) for d in om.group_obs_term_dim['policy']], gap_model.x_names),
+                device=args.device, dtype=torch.long)
+            print(f'Gap gate: {args.gap_model_checkpoint}, lambda={args.gap_gate_scale:g}, {len(gap_columns)} inputs', flush=True)
         term = env.command_manager.get_term('motion')
         robot = env.scene['robot']
         action = env.action_manager.get_term('joint_pos')
@@ -369,7 +378,7 @@ def worker(args):
             zero_mask = torch.zeros(args.num_envs, device=args.device, dtype=torch.bool)
             gate_scales[:n] = torch.tensor([w.get('gate_scale', 0.) for w in batch], device=args.device)
             zero_mask[:n] = torch.tensor([w.get('zero_delta', False) for w in batch], device=args.device)
-            gate_history = [[] for _ in batch]
+            gate_history = [[] for _ in batch]; u_history = [[] for _ in batch]
             ids = torch.arange(n, device=args.device)
             traj = np.array([w['trajectory'] for w in batch]); starts = np.array([w['start'] for w in batch])
             term.trajectory_ids[ids] = torch.as_tensor(traj, device=args.device)
@@ -426,6 +435,13 @@ def worker(args):
                             gate_history[i].append(float(gate_values[i]))
                     else:
                         delta = torch.zeros((args.num_envs,6),device=args.device) if args.zero_delta else policy(obs)
+                        if gap_model is not None:
+                            u_gap = gap_model.predict(obs[:, gap_columns])['u']
+                            gate = torch.exp(-args.gap_gate_scale * u_gap)
+                            delta = delta * gate.unsqueeze(-1)
+                            gate_values, u_values = gate[:n].cpu().numpy(), u_gap[:n].cpu().numpy()
+                            for i in range(n):
+                                gate_history[i].append(float(gate_values[i])); u_history[i].append(float(u_values[i]))
                 finite_delta = torch.isfinite(delta).all(dim=-1)
                 for i in range(n):
                     if not bool(finite_delta[i]):
@@ -461,6 +477,10 @@ def worker(args):
                 if member_policies:
                     row['disagreement_curve'] = disagreement_curves[i]
                     row['gate_mean'] = float(np.mean(gate_history[i]))
+                if gap_model is not None and gate_history[i]:
+                    row['gate_mean'] = float(np.mean(gate_history[i][:w['steps']]))
+                    row['gap_u_mean'] = float(np.mean(u_history[i][:w['steps']]))
+                    row['gap_u_start'] = u_history[i][0]
                 if good:
                     row.update({'endpoint_'+k:v for k,v in per_window[i][-1].items()})
                     row.update({'mean_'+k:float(np.mean([e[k] for e in per_window[i]])) for k in per_window[i][0]})
@@ -534,6 +554,9 @@ def main():
     p.add_argument('--measurement_interval_s', type=float,
                    help='Save instantaneous error curves at nearest control frames, including reset')
     p.add_argument('--zero_delta', action='store_true', help='Replay with zero delta using the supplied checkpoint configuration')
+    p.add_argument('--gap_model_checkpoint', type=Path,
+                   help='Gate the single delta by a gap-model ensemble: delta * exp(-gap_gate_scale * u_gap), as in MyOnPolicyRunner')
+    p.add_argument('--gap_gate_scale', type=float, help='Lambda for --gap_model_checkpoint')
     p.add_argument('--validate_only', action='store_true')
     p.add_argument('--timeout_s', type=float, default=3600)
     p.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
@@ -553,6 +576,14 @@ def main():
             p.error('Gate scales require an ensemble and distinct nonnegative finite values')
     elif args.include_zero_baseline:
         p.error('include_zero_baseline requires ensemble_gate_scales')
+    if (args.gap_model_checkpoint is None) != (args.gap_gate_scale is None):
+        p.error('--gap_model_checkpoint and --gap_gate_scale go together')
+    if args.gap_model_checkpoint is not None:
+        if args.ensemble_checkpoints or args.zero_delta or not np.isfinite(args.gap_gate_scale) or args.gap_gate_scale < 0:
+            p.error('Gap gate needs a single nonzero delta and a nonnegative finite scale')
+        args.gap_model_checkpoint = args.gap_model_checkpoint.resolve()
+        if not args.gap_model_checkpoint.is_file():
+            p.error(f'Missing gap model: {args.gap_model_checkpoint}')
     if args.ensemble_checkpoints and (len(set(args.ensemble_checkpoints)) < 2
                                     or len(set(args.ensemble_checkpoints)) != len(args.ensemble_checkpoints)
                                     or args.zero_delta or args.measurement_interval_s is None):
@@ -599,6 +630,8 @@ def main():
     manifest['measurement_interval_s'] = args.measurement_interval_s
     manifest['ensemble_gate_scales'] = args.ensemble_gate_scales
     manifest['include_zero_baseline'] = args.include_zero_baseline
+    manifest['gap_model_checkpoint'] = str(args.gap_model_checkpoint) if args.gap_model_checkpoint else None
+    manifest['gap_gate_scale'] = args.gap_gate_scale
     manifest['windows_per_trajectory'] = args.windows_per_trajectory
     manifest['ensemble_members'] = [dict(checkpoint=str(path), sha256=sha256(path),
                                          config_sha256={key:sha256(path.parent/'params'/key) for key in ('env.pkl','agent.pkl')})
@@ -622,6 +655,8 @@ def main():
         command.extend(['--ensemble_checkpoints', *map(str, args.ensemble_checkpoints)])
     if args.ensemble_gate_scales is not None:
         command.extend(['--ensemble_gate_scales', *map(str, args.ensemble_gate_scales)])
+    if args.gap_model_checkpoint is not None:
+        command.extend(['--gap_model_checkpoint', str(args.gap_model_checkpoint), '--gap_gate_scale', str(args.gap_gate_scale)])
     environment = os.environ.copy()
     environment['PYTHONUNBUFFERED'] = '1'
     environment['PYTHONPATH'] = str(ROOT/'source/whole_body_tracking') + os.pathsep + environment.get('PYTHONPATH', '')
