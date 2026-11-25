@@ -21,6 +21,7 @@ This project studies G1 humanoid motion tracking and whether learned residual dy
 - **Understand the ensemble transfer result:** [Research hypothesis and interpretation](ensemble_transfer_research.md); [experiment ledger and evidence](ensemble_transfer_experiment_ledger.md).
 - **Understand the wrench model:** [Pelvis-wrench dynamics emulation](pelvis_wrench_delta.md).
 - **Understand resets and sampling:** [Episode length and motion sampling](episode_length_resets_motion_sampling.md).
+- **Play, delta-train or finetune the Sprout BlinkMimic tracker:** [Sprout tasks with a BlinkMimic base policy](sprout_blinkmimic_tasks.md).
 - **Read VLM descriptions:** [Motion captioning](motion_captioning.md).
 
 ## Weekly research logs
@@ -29,6 +30,7 @@ This project studies G1 humanoid motion tracking and whether learned residual dy
 - [Week of 2026.10.28](research_log/2026.10.28.md): torso-payload pelvis-wrench delta, gap-model gating; best finetune λ = 1.0 without randomization.
 - [Week of 2026.11.04](research_log/2026.11.04.md): data-scale study; a delta from 100 episodes still transfers to m4 after finetuning.
 - [Week of 2026.11.11](research_log/2026.11.11.md): limb payloads; with a 10 kg arm payload, a pelvis-wrench delta finetune lifts m4 completion from 72.6% to 91.0%, where DR-only finetuning does not.
+- [Week of 2026.11.18](research_log/2026.11.18.md): pelvis +12.5 kg chain m0→m1→m2; gap-gated delta finetunes beat plain finetuning on local tracking on both m1 and m2 (−2.4 / −3.4 mm local MPJPE over 20 checkpoints), but plain finetuning alone already removes the payload falls.
 
 ## Detailed visual references
 

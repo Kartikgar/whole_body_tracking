@@ -8,6 +8,29 @@ HumSim2Real extends BeyondMimic whole-body tracking for the Unitree G1. The rese
 
 The repository supports two tracking behaviors: pretrained NVIDIA SONIC and motion-specific BeyondMimic checkpoints. Their rollouts support difficulty/safety ranking, executed-behavior relevance analysis, and selecting motion pairs for transfer experiments. Genesis provides a target simulation environment in which base policies can be evaluated and their state/action trajectories recorded.
 
+## Target: iterative, failure-free sim-to-real through a motion curriculum
+
+On hardware, every fall during data collection is costly. The goal is to learn the sim-to-real gap from data gathered
+**without failures**. In the sim-to-sim study Genesis plays the real robot, and a Genesis fall counts as a hardware failure.
+The approach is a curriculum over motions m1 → m2 → … → m5, ordered from safe to risky:
+
+1. Collect data safely on m_k.
+2. Train or update the delta.
+3. Finetune the base policy for m_{k+1} in Isaac + delta.
+4. Deploy on m_{k+1} without falls, then repeat with k + 1.
+
+Deployment inside a motion is iterative too. Segments of m_{k+1} differ in difficulty, so they are deployed in order of
+estimated safety (difficulty/safety metrics, delta uncertainty). Data from the segments deployed so far updates the delta.
+The policy is then re-finetuned before the next, harder segments.
+
+**Evidence so far.** A delta trained on a sequence of easier motions (m1_m2_m3) transfers to harder ones after finetuning:
+m4 Fast Walking and m6 Running. That covers one jump of the curriculum. Still open:
+- each single step (m1 → m2, m2 → m3, m3 → m4);
+- the full chain;
+- the segment-level deployment loop.
+
+The figure of merit is the number of failures incurred along the way as well as final tracking.
+
 ## The role of a delta model
 
 A delta model observes the current robot state and base joint action. It adds a joint correction or pelvis wrench in Isaac so that the resulting transition resembles the recorded target transition:
