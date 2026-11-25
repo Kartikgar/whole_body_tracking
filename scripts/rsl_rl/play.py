@@ -36,6 +36,13 @@ parser.add_argument("--batch_endpoint_height_error_tolerance_m", type=float, def
 parser.add_argument("--batch_output_json", type=str, default=None)
 parser.add_argument("--batch_output_npz", type=str, default=None)
 parser.add_argument("--batch_video_folder", type=str, default=None)
+parser.add_argument("--ghost_npz", type=str, default=None,
+                    help="Batch eval video: replay this ghost NPZ (scripts/rsl_rl/make_ghost_npz.py) as translucent robots, one per env.")
+parser.add_argument("--ghost_opacity", type=float, default=0.45)
+parser.add_argument("--robot_opacity", type=float, default=None,
+                    help="Render the simulated robot translucent (visual meshes only; collisions/physics unchanged).")
+parser.add_argument("--wrench_arrows", action="store_true",
+                    help="Batch eval video: draw the applied (gated) pelvis wrench as force/torque arrows; logs it to wrench_log.npz.")
 parser.add_argument("--export_onnx_path", type=str, default=None,
                     help="Export the loaded motion policy and active reference to this ONNX path, including in batch mode.")
 parser.add_argument(
@@ -924,11 +931,17 @@ def _resolve_state_action_metadata(
     default_joint_pos = robot_data.default_joint_pos[0].detach().cpu().numpy().astype(np.float32)
 
     action_scale = np.ones(len(joint_names), dtype=np.float32)
+    # Joint order of `actions` and `action_scale`: the action term's, which differs from `joint_names` (articulation
+    # order) when the term uses preserve_order (e.g. Sprout BlinkMimic tasks use the MJCF order).
+    action_joint_names = list(joint_names)
     external_action_scale = 1.0
     action_manager = getattr(env, "action_manager", None)
     if action_manager is not None:
         try:
             joint_pos_term = action_manager.get_term("joint_pos")
+            term_joint_names = getattr(joint_pos_term, "_joint_names", None)
+            if term_joint_names is not None and len(term_joint_names) == len(joint_names):
+                action_joint_names = list(term_joint_names)
             scale_tensor = getattr(joint_pos_term, "_scale", None)
             if isinstance(scale_tensor, torch.Tensor):
                 scale_np = scale_tensor[0].detach().cpu().numpy().astype(np.float32).reshape(-1)
@@ -959,6 +972,7 @@ def _resolve_state_action_metadata(
         action_mode = "base_policy_raw"
     return {
         "joint_names": joint_names,
+        "action_joint_names": action_joint_names,
         "body_names": body_names,
         "default_joint_pos": default_joint_pos,
         "action_scale": action_scale,
@@ -1217,6 +1231,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     elif args_cli.motion_file is not None:
         print("[INFO]: This task has no motion command; ignoring --motion_file.")
     _configure_delta_action_space(env_cfg)
+    if args_cli.robot_opacity is not None:
+        from ghost_overlay import make_robot_translucent
+        make_robot_translucent(env_cfg, opacity=args_cli.robot_opacity)
+    if args_cli.ghost_npz:
+        from ghost_overlay import add_ghost_to_scene
+        add_ghost_to_scene(env_cfg, opacity=args_cli.ghost_opacity)
     _configure_hierarchical_switch_policies(env_cfg)
     if args_cli.disable_dr and not args_cli.batch_eval:
         _disable_domain_randomization(env_cfg)
@@ -1264,6 +1284,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # obtain the trained policy for inference
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
+    def _batch_before_render(base_env, runner):
+        """Per-step render hooks for batch-eval videos: ghost poses and/or wrench arrows (each one batched call)."""
+        hooks = []
+        if args_cli.ghost_npz:
+            from ghost_overlay import make_ghost_writer
+            hooks.append(make_ghost_writer(base_env, args_cli.ghost_npz))
+        if args_cli.wrench_arrows:
+            from wrench_arrows import make_wrench_arrow_writer
+            log = pathlib.Path(args_cli.batch_video_folder or pathlib.Path(args_cli.batch_output_json).parent) / "wrench_log.npz"
+            hooks.append(make_wrench_arrow_writer(base_env, runner, str(log)))
+        if not hooks:
+            return None
+        return lambda step: [h(step) for h in hooks]
+
     if args_cli.batch_eval:
         def inject_batch_delta(actions):
             if ppo_runner.delta_policy is None:
@@ -1329,6 +1363,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 bootstrap=_bootstrap_motion_reference_startup,
                 metadata=_resolve_state_action_metadata,
                 before_step=inject_batch_delta,
+                before_render=_batch_before_render(env.unwrapped, ppo_runner),
                 fail_on_termination=not args_cli.batch_allow_failures,
                 endpoint_height_error_tolerance_m=args_cli.batch_endpoint_height_error_tolerance_m,
                 experiment_metadata=dict(task=args_cli.task, domain_randomization=False, observation_noise=False,
@@ -1443,7 +1478,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[INFO]: Collecting state-action trajectories until exit into {state_action_output_path}")
 
     # Export ONNX only for motion-command tasks, since exporter metadata expects `commands.motion`.
-    if _has_motion_command(env_cfg) and getattr(_get_pelvis_wrench_term(env.unwrapped), "deployment_export", True):
+    # BlinkMimic actors (Sprout tasks) are not MLPs; their deployment export is not implemented yet.
+    is_blinkmimic_actor = hasattr(ppo_runner.alg.policy, "load_blinkmimic_weights")
+    if (_has_motion_command(env_cfg) and not is_blinkmimic_actor
+            and getattr(_get_pelvis_wrench_term(env.unwrapped), "deployment_export", True)):
         export_model_dir = (str(pathlib.Path(args_cli.export_onnx_path).resolve().parent)
                             if args_cli.export_onnx_path else os.path.join(os.path.dirname(resume_path), "exported"))
         checkpoint_stem = os.path.splitext(os.path.basename(resume_path))[0]
