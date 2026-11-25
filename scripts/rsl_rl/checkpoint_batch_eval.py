@@ -70,7 +70,7 @@ def run_checkpoint_batch_eval(
     *, env, policy, simulation_app, checkpoint: str, motion_file: str, motion_frames: int,
     seed: int, spawn_joint_noise_rad: float, output_json: str, output_npz: str,
     video_folder: str | None, capture_reference, capture_state, bootstrap, metadata,
-    before_step=None, fail_on_termination=True, experiment_metadata=None,
+    before_step=None, before_render=None, fail_on_termination=True, experiment_metadata=None,
     endpoint_height_error_tolerance_m: float = 0.25,
 ) -> None:
     if not np.isfinite(endpoint_height_error_tolerance_m) or endpoint_height_error_tolerance_m <= 0:
@@ -234,6 +234,8 @@ def run_checkpoint_batch_eval(
                                 joint_rmse_rad=float(metrics['error_joint_pos'][env_id].item()/np.sqrt(state_np['joint_pos'].shape[-1]))))
                 steps_run += 1
                 if writer is not None:
+                    if before_render is not None:  # e.g. batched ghost-pose writes (ghost_overlay.py)
+                        before_render(step)
                     writer.append_data(base_env.render())
                 if step % 50 == 49:
                     print(f"[Checkpoint batch] {step + 1}/{motion_frames} steps, active={sum(r is None for r in termination_reasons)}/{num_envs}", flush=True)

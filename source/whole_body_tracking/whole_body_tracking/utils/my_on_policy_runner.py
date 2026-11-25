@@ -38,6 +38,13 @@ class MotionOnPolicyRunner(OnPolicyRunner):
     def __init__(
         self, env: VecEnv, train_cfg: dict, log_dir: str | None = None, device="cpu", registry_name: str = None
     ):
+        if train_cfg.get("policy", {}).get("class_name") == "BlinkMimicActorCritic":
+            # RSL-RL resolves policy classes by name in its runner module; register the BlinkMimic wrapper there.
+            import rsl_rl.runners.on_policy_runner as rsl_runner_module
+
+            from whole_body_tracking.blinkmimic.rsl_actor_critic import BlinkMimicActorCritic
+
+            rsl_runner_module.BlinkMimicActorCritic = BlinkMimicActorCritic
         super().__init__(env, train_cfg, log_dir, device)
         self.registry_name = registry_name
         self.delta_policy_checkpoints = self._normalize_delta_policy_checkpoints(
@@ -151,7 +158,15 @@ class MotionOnPolicyRunner(OnPolicyRunner):
             raise ValueError("Pelvis-wrench checkpoint scales, clipping, frame, body or observation layout mismatch")
 
     def load(self, path: str, load_optimizer: bool = True):
-        self._validate_wrench_checkpoint(torch.load(path, map_location="cpu", weights_only=False))
+        loaded = torch.load(path, map_location="cpu", weights_only=False)
+        if isinstance(loaded, dict) and "pi" in loaded and "args" in loaded and "model_state_dict" not in loaded:
+            # A raw BlinkMimic checkpoint: load its EMA policy into the actor; critic, std and optimizer start fresh.
+            if not hasattr(self.alg.policy, "load_blinkmimic_weights"):
+                raise ValueError(f"{path} is a BlinkMimic checkpoint; the task's policy must be BlinkMimicActorCritic")
+            self.alg.policy.load_blinkmimic_weights(loaded)
+            print(f"[INFO]: Loaded BlinkMimic policy (EMA weights, iteration {loaded.get('iteration')}) from {path}")
+            return None
+        self._validate_wrench_checkpoint(loaded)
         infos = super().load(path, load_optimizer=load_optimizer)
         if load_optimizer:
             # RSL-RL restores Adam's LR but leaves the adaptive scheduler at the
@@ -666,6 +681,8 @@ class MotionOnPolicyRunner(OnPolicyRunner):
         super().save(path, infos)
         if metadata is not None and metadata["role"] == "open_loop":
             return
+        if hasattr(self.alg.policy, "load_blinkmimic_weights"):
+            return  # BlinkMimic actor (Sprout): ONNX deployment export not implemented yet
         if self.logger_type in ["wandb"]:
             policy_path = path.split("model")[0]
             filename = policy_path.split("/")[-2] + ".onnx"

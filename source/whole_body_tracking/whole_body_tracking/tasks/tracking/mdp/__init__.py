@@ -10,3 +10,5 @@ from .rewards import *  # noqa: F401, F403
 from .terminations import *  # noqa: F401, F403
 
 from .pelvis_wrench import *  # noqa: F401, F403
+
+from .blinkmimic import blinkmimic_goal, blinkmimic_proprio, blinkmimic_root_error  # noqa: F401
